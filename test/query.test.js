@@ -202,6 +202,23 @@ test('query: revoking the access key kills capabilities minted before revocation
   assert.equal(audit.decision, 'deny:key-revoked');
 });
 
+test('query: eight levels of derived nesting still mask (I10, no hop cap)', async () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const { token } = mint(s.signing);
+  let sql = 'select first_name as a8 from employee';
+  for (let i = 7; i >= 1; i -= 1) sql = `select a${i + 1} as a${i} from (${sql}) t${i}`;
+
+  const result = await run(s, {
+    sql,
+    token,
+    driverFactory: () => ({
+      query: async () => ({ fields: ['a1'], rows: [{ a1: PII.first }] }),
+      close: async () => {},
+    }),
+  });
+  assert.equal(result.rows[0].a1, '[REDACTED]');
+});
+
 test('query: no PII value is present anywhere in the audit trail', async () => {
   const s = setup({ registry: DEFAULT_REGISTRY });
   const { token } = mint(s.signing);

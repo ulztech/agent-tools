@@ -112,6 +112,48 @@ test('masking: two derived tables exposing the same output name do not erase eac
   assert.equal(out.rows[0].x, REDACTED);
 });
 
+function nestedSql(depth) {
+  let sql = `select first_name as a${depth} from employee`;
+  for (let i = depth - 1; i >= 1; i -= 1) sql = `select a${i + 1} as a${i} from (${sql}) t${i}`;
+  return sql;
+}
+
+test('masking: deep derived nesting (7 levels) still masks', () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const out = maskRows({
+    rows: [{ a1: PII.first }],
+    fields: ['a1'],
+    sql: nestedSql(7),
+    registry: registryOf(s),
+    salt: 'salt',
+  });
+  assert.equal(out.rows[0].a1, REDACTED);
+});
+
+test('masking: deep derived nesting (12 levels) still masks', () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const out = maskRows({
+    rows: [{ a1: PII.first }],
+    fields: ['a1'],
+    sql: nestedSql(12),
+    registry: registryOf(s),
+    salt: 'salt',
+  });
+  assert.equal(out.rows[0].a1, REDACTED);
+});
+
+test('masking: a self-referential alias terminates and masks', () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const out = maskRows({
+    rows: [{ x: PII.first }],
+    fields: ['x'],
+    sql: 'select x from (select x from (select first_name as x from employee) a) b',
+    registry: registryOf(s),
+    salt: 'salt',
+  });
+  assert.equal(out.rows[0].x, REDACTED);
+});
+
 test('masking: a derived-table alias cannot launder a masked column', () => {
   const s = setup({ registry: DEFAULT_REGISTRY });
   const out = maskRows({

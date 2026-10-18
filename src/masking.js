@@ -182,19 +182,13 @@ export function maskRows({ rows, fields, sql, registry, salt }) {
     const expandDerived = (start) => {
       const out = new Set();
       const queue = [...start];
-      let hops = 0;
-      while (queue.length && hops < 6) {
-        const next = [];
-        for (const raw of queue) {
-          const key = String(raw).toLowerCase();
-          if (out.has(key)) continue;
-          out.add(key);
-          const inner = analysis.derived?.get(key);
-          if (inner) next.push(...inner);
-        }
-        queue.length = 0;
-        queue.push(...next);
-        hops += 1;
+      // No hop cap — see sqlgate.analyzeProjection. A truncated walk fails open.
+      while (queue.length) {
+        const key = String(queue.shift()).toLowerCase();
+        if (out.has(key)) continue;
+        out.add(key);
+        const inner = analysis.derived?.get(key);
+        if (inner) queue.push(...inner);
       }
       return out;
     };

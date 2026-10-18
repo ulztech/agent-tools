@@ -1,7 +1,6 @@
 import { GatewayError } from './util.js';
 
 const MAX_SQL_LENGTH = 20_000;
-const MAX_NESTED_LINEAGE = 6;
 
 const ALLOWED_FIRST = new Set(['select', 'with', 'explain', 'describe', 'desc', 'show']);
 const SHOW_ALLOW = new Set(['tables', 'columns', 'index', 'indexes', 'create', 'full']);
@@ -333,19 +332,14 @@ export function analyzeProjection(sql) {
   const expand = (names) => {
     const out = new Set();
     const queue = [...(names || [])];
-    let hops = 0;
-    while (queue.length && hops < MAX_NESTED_LINEAGE) {
-      const next = [];
-      for (const raw of queue) {
-        const n = String(raw).toLowerCase();
-        if (out.has(n)) continue;
-        out.add(n);
-        const inner = derived.get(n);
-        if (inner) next.push(...inner);
-      }
-      queue.length = 0;
-      queue.push(...next);
-      hops += 1;
+    // No hop cap: the derived graph is finite and cycle-safe via `out`. Truncating it
+    // would leave synthetic aliases unresolved, which fails *open* (unmasked).
+    while (queue.length) {
+      const n = String(queue.shift()).toLowerCase();
+      if (out.has(n)) continue;
+      out.add(n);
+      const inner = derived.get(n);
+      if (inner) queue.push(...inner);
     }
     return out;
   };
