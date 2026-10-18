@@ -374,26 +374,35 @@ export function analyzeProjection(sql) {
   // `select * from ( … ) t` gives no names to match on, and an unaliased expression's
   // driver column name is the expression text, which we cannot reproduce. Map the star's
   // columns **by position** to the immediate derived select's items instead.
+  //
+  // Two shapes make the positions unknowable:
+  //   - the immediate derived select mixes `*` with other items (the star expands to N
+  //     driver columns but consumes one parsed item, shifting every later index)
+  //   - the derived chain is nested two or more deep, so an inner `*` can hide expressions
+  // For those we refuse to guess, and the masker redacts every column rather than leak.
+  let positionalUnknown = false;
   if (star) {
     const immediate = selects.filter((s) => s.depth === 1);
-    if (immediate.length === 1) {
-      byPosition.length = 0;
-      for (const item of immediate[0].items) {
-        byPosition.push(item.star ? new Set() : expand(item.sources || []));
-      }
-    } else if (immediate.length > 1) {
-      const union = new Set();
-      for (const s of immediate) {
-        for (const item of s.items) {
-          if (item.star) continue;
-          for (const name of expand(item.sources || [])) union.add(name);
+    if (immediate.length > 0) {
+      const hasStar = immediate.some((s) => s.items.some((i) => i.star));
+      const shiftRisk = immediate.some((s) => s.items.length > 1 && s.items.some((i) => i.star));
+      const nested = selects.some((s) => s.depth >= 2);
+      if (hasStar && (shiftRisk || nested)) {
+        positionalUnknown = true;
+      } else if (!hasStar) {
+        byPosition.length = 0;
+        for (const s of immediate) {
+          for (const item of s.items) {
+            byPosition.push(item.star ? new Set() : expand(item.sources || []));
+          }
         }
       }
-      for (let i = 0; i < Math.max(maxLen, 1); i += 1) byPosition[i] = union;
+      // else: a single pure star over a base table — driver names are real column names,
+      // so the name fallback in the masker is exact.
     }
   }
 
-  return { tokens, star, branches, byOutput, byPosition, derived };
+  return { tokens, star, branches, byOutput, byPosition, derived, positionalUnknown };
 }
 
 /** Backwards-compatible view: the first top-level select list. */

@@ -166,6 +166,12 @@ export function maskRows({ rows, fields, sql, registry, salt }) {
     const found = [];
     const seen = new Set();
 
+    // Positions are unknowable for this shape (a `*` mixed with other items, or a nested
+    // `*`). Redact everything rather than guess — masking more never blocks a result.
+    if (analysis.positionalUnknown) {
+      return [{ table: null, column: columnName, strategy: 'redact', params: null, matchedBy: 'lineage' }];
+    }
+
     const collect = (names, matchedBy) => {
       for (const raw of names || []) {
         const key = String(raw).toLowerCase();
