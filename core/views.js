@@ -104,13 +104,14 @@ export function loginPage({ error = '' } = {}) {
   });
 }
 
-export function totpLoginPage({ error = '', username }) {
+export function totpLoginPage({ error = '', username, csrf = '' }) {
   return bare({
     title: 'Authenticator code',
     body: `<div class="card">
 <h1>Authenticator code</h1>
 <p class="lede">Signed in as <strong>${esc(username)}</strong>. Enter the 6-digit code from your authenticator app.</p>
 <form method="post" action="/auth/totp">
+<input type="hidden" name="_csrf" value="${esc(csrf)}">
 <label for="code" class="muted">Code</label>
 <input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required autofocus>
 <p class="err">${esc(error)}</p>

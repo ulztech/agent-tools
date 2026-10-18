@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   idle_expires_at TEXT NOT NULL,
   absolute_expires_at TEXT NOT NULL,
   step_up_until TEXT,
+  idle_ms INTEGER NOT NULL DEFAULT 900000,
   ip TEXT,
   ua_hash TEXT,
   revoked_at TEXT

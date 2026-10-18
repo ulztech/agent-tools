@@ -115,8 +115,10 @@ useless afterwards. TOTP is any standard app — add the setup key shown at enro
 Not in this slice: QR rendering (the setup key is manual), TOTP rotation, and the
 gateway inventory inside Tools/Policy — the gateway still owns it until C3.
 
-Every auth event is hash-chained (`prev_hash` → `row_hash`) and the Overview page reports
-the verification result, so tampering with an existing row is visible.
+Every auth event is hash-chained (`prev_hash` → `row_hash`) and the Overview reports the
+verification result. The chain is **unkeyed**: it catches edits, deletions in the middle
+and reordering, but someone who can write to the database can recompute the whole chain.
+Keyed signing plus an external anchor land in C3.
 
 ## Layout
 

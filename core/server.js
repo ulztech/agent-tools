@@ -370,7 +370,7 @@ export function createPlatformServer({ db, masterKey }) {
       const session = sessionOf(req);
       if (!session) return redirect(res, '/login');
       if (session.auth_level >= 2) return redirect(res, '/');
-      return sendHtml(res, 200, totpLoginPage({ username: session.username }));
+      return sendHtml(res, 200, totpLoginPage({ username: session.username, csrf: session.csrf_token }));
     }
 
     if (path === '/login/recovery' && req.method === 'GET') {
@@ -403,18 +403,28 @@ export function createPlatformServer({ db, masterKey }) {
     if (path === '/auth/totp' && req.method === 'POST') {
       const session = sessionOf(req);
       if (!session) return redirect(res, '/login');
+      const body = await readBody(req);
+      if (!requireCsrf(session, res, body._csrf)) return undefined;
       const user = userById(db, session.user_id);
       const key = `totp:${user.id}`;
-      const { code } = await readBody(req);
+      const code = body.code;
       if (isLocked(db, key)) {
-        return sendHtml(res, 429, totpLoginPage({ username: session.username, error: 'Too many attempts. Try again later.' }));
+        return sendHtml(
+          res,
+          429,
+          totpLoginPage({ username: session.username, csrf: session.csrf_token, error: 'Too many attempts. Try again later.' }),
+        );
       }
       const secret = secretFor(user);
       const step = secret ? verifyTotp(secret, code, user.totp_last_step) : null;
       if (!step) {
         recordFailure(db, key);
         audit(db, { userId: user.id, event: 'login.totp', factor: 'totp', result: 'fail' });
-        return sendHtml(res, 401, totpLoginPage({ username: session.username, error: 'That code did not match.' }));
+        return sendHtml(
+          res,
+          401,
+          totpLoginPage({ username: session.username, csrf: session.csrf_token, error: 'That code did not match.' }),
+        );
       }
       clearFailures(db, key);
       db.prepare('UPDATE users SET totp_last_step = ? WHERE id = ?').run(step, user.id);
@@ -442,7 +452,7 @@ export function createPlatformServer({ db, masterKey }) {
     if (path === '/step-up' && req.method === 'GET') {
       if (!requireL2(session, res)) return undefined;
       const raw = url.searchParams.get('next') || '/';
-      const next = /^\/(?!\/)/.test(raw) ? raw : '/';
+      const next = /^\/[^\\\s]*$/.test(raw) && !raw.startsWith('//') ? raw : '/';
       return sendHtml(res, 200, stepUpPage({ next, csrf: session.csrf_token }));
     }
 

@@ -6,7 +6,7 @@ import path from 'node:path';
 import { audit, openPlatformDb } from '../core/db.js';
 import { verifyChain } from '../core/chain.js';
 import { createPlatformServer } from '../core/server.js';
-import { createSession, liveSessions, loadSession, markStepUp } from '../core/sessions.js';
+import { createSession, liveSessions, loadSession, markStepUp, touchSession } from '../core/sessions.js';
 import {
   consumeCode,
   generateRecoveryCodes,
@@ -341,11 +341,17 @@ test('server: TOTP failures lock the account with a 429', async () => {
 
     let last = 0;
     for (let i = 0; i < MAX_FAILURES; i += 1) {
-      const res = await post('/auth/totp', { cookie: l1.header, form: { code: '000000' } });
+      const res = await post('/auth/totp', {
+        cookie: l1.header,
+        form: { _csrf: l1.session.csrf_token, code: '000000' },
+      });
       last = res.status;
       assert.equal(res.status, 401, `attempt ${i + 1}`);
     }
-    const locked = await post('/auth/totp', { cookie: l1.header, form: { code: '000000' } });
+    const locked = await post('/auth/totp', {
+      cookie: l1.header,
+      form: { _csrf: l1.session.csrf_token, code: '000000' },
+    });
     assert.equal(locked.status, 429);
     assert.equal(last, 401);
   } finally {
@@ -447,4 +453,29 @@ test('sessions: expired sessions are not listed as live', () => {
     s.id,
   );
   assert.equal(liveSessions(db).some((x) => x.id === s.id), false);
+});
+test('sessions: touching an L1 session keeps its 5-minute idle, not 15', () => {
+  const { db } = openPlatformDb(tempDir());
+  db.prepare(`INSERT INTO users (id, username, role, status, created_at) VALUES ('i1','i1','owner','active',?)`).run(
+    new Date().toISOString(),
+  );
+  const s = createSession(db, { userId: 'i1', authLevel: 1, idleMs: 5 * 60_000 });
+  touchSession(db, s.id);
+  const row = db.prepare('SELECT idle_ms, idle_expires_at FROM sessions WHERE id = ?').get(s.id);
+  assert.equal(row.idle_ms, 5 * 60_000);
+  const remaining = Date.parse(row.idle_expires_at) - Date.now();
+  assert.ok(remaining > 4 * 60_000 && remaining <= 5 * 60_000 + 1000, `remaining ${remaining}`);
+});
+
+test('server: a backslash in next= cannot become a protocol-relative redirect', async () => {
+  const { server, cookieFor, get } = await boot();
+  try {
+    const owner = cookieFor('owner1');
+    const res = await get('/step-up?next=%2F%5Cevil.example', owner.header);
+    const html = await res.text();
+    assert.equal(html.includes('evil.example'), false);
+    assert.ok(html.includes('data-next="/"'));
+  } finally {
+    server.close();
+  }
 });

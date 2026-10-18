@@ -22,11 +22,19 @@ export class AuthError extends Error {
 }
 
 function storeChallenge(db, { challenge, userId, type, ttlMs = 5 * 60_000 }) {
-  db.prepare('DELETE FROM challenges WHERE expires_at < ?').run(new Date().toISOString());
+  const now = new Date().toISOString();
+  db.prepare('DELETE FROM challenges WHERE expires_at < ?').run(now);
+  // Bound the table: /auth/options is unauthenticated, so without a cap a caller could
+  // grow it without limit.
+  db.prepare(
+    `DELETE FROM challenges WHERE challenge IN (
+       SELECT challenge FROM challenges ORDER BY created_at DESC LIMIT -1 OFFSET 2000
+     )`,
+  ).run();
   db.prepare(
     `INSERT OR REPLACE INTO challenges (challenge, user_id, type, created_at, expires_at, used_at)
      VALUES (?,?,?,?,?,NULL)`,
-  ).run(challenge, userId, type, new Date().toISOString(), new Date(Date.now() + ttlMs).toISOString());
+  ).run(challenge, userId, type, now, new Date(Date.now() + ttlMs).toISOString());
 }
 
 /** Single use: the row is consumed before verification, so a replay finds nothing. */
