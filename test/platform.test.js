@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { openPlatformDb } from '../core/db.js';
+import { audit, openPlatformDb } from '../core/db.js';
+import { verifyChain } from '../core/chain.js';
 import { createPlatformServer } from '../core/server.js';
-import { createSession, loadSession, markStepUp } from '../core/sessions.js';
+import { createSession, liveSessions, loadSession, markStepUp } from '../core/sessions.js';
 import {
   consumeCode,
   generateRecoveryCodes,
@@ -252,6 +253,7 @@ test('server: a session can be revoked from the people page', async () => {
   const { server, cookieFor, post, db } = await boot();
   try {
     const owner = cookieFor('owner1');
+    markStepUp(db, owner.session.id);
     const victim = cookieFor('member2');
     const res = await post(`/people/sessions/${victim.session.id}/revoke`, {
       cookie: owner.header,
@@ -271,6 +273,7 @@ test('server: a pending invite can be revoked', async () => {
     assert.equal(pendingInvites(db).length, 1);
     const inviteId = pendingInvites(db)[0].id;
     const owner = cookieFor('owner1');
+    markStepUp(db, owner.session.id);
     const res = await post(`/people/invites/${inviteId}/revoke`, {
       cookie: owner.header,
       form: { _csrf: owner.session.csrf_token },
@@ -362,4 +365,86 @@ test('server: recovery and TOTP surfaces are L2-gated where required', async () 
   } finally {
     server.close();
   }
+});
+
+/* ------------------------------------------------------------------ */
+/* Audit chain and regression fixes                                    */
+/* ------------------------------------------------------------------ */
+
+test('chain: tampering with an auth event breaks verification', () => {
+  const { db } = openPlatformDb(tempDir());
+  db.prepare(`INSERT INTO users (id, username, role, status, created_at) VALUES ('c1','c1','owner','active',?)`).run(
+    new Date().toISOString(),
+  );
+  audit(db, { userId: 'c1', event: 'login.passkey', result: 'ok' });
+  audit(db, { userId: 'c1', event: 'login.totp', result: 'ok' });
+  assert.equal(verifyChain(db).ok, true);
+  db.prepare("UPDATE auth_events SET result = 'fail' WHERE seq = 1").run();
+  const broken = verifyChain(db);
+  assert.equal(broken.ok, false);
+  assert.equal(broken.brokenAt, 1);
+});
+
+test('server: a confirmed user cannot re-read the TOTP seed at L1', async () => {
+  const { server, cookieFor, get, post, db, masterKey, ids } = await boot();
+  try {
+    db.prepare('UPDATE users SET totp_secret = ?, totp_confirmed_at = ? WHERE id = ?').run(
+      seal(masterKey, generateSecret(), ids.member1),
+      new Date().toISOString(),
+      ids.member1,
+    );
+    const l1 = cookieFor('member1', 1);
+    const page = await get('/enroll/totp', l1.header);
+    assert.equal(page.status, 303);
+    assert.equal(page.headers.get('location'), '/');
+
+    const res = await post('/enroll/totp', {
+      cookie: l1.header,
+      form: { _csrf: l1.session.csrf_token, code: '000000' },
+    });
+    assert.equal(res.status, 403);
+  } finally {
+    server.close();
+  }
+});
+
+test('server: step-up cannot redirect off-site', async () => {
+  const { server, cookieFor, get } = await boot();
+  try {
+    const owner = cookieFor('owner1');
+    const res = await get('/step-up?next=//evil.example', owner.header);
+    const html = await res.text();
+    assert.equal(html.includes('evil.example'), false);
+    assert.ok(html.includes('data-next="/"'));
+  } finally {
+    server.close();
+  }
+});
+
+test('server: an invalid role on invite is refused', async () => {
+  const { server, cookieFor, post, db } = await boot();
+  try {
+    const owner = cookieFor('owner1');
+    markStepUp(db, owner.session.id);
+    const res = await post('/people/invite', {
+      cookie: owner.header,
+      form: { _csrf: owner.session.csrf_token, username: 'x', role: 'superuser' },
+    });
+    assert.equal(res.status, 403);
+  } finally {
+    server.close();
+  }
+});
+
+test('sessions: expired sessions are not listed as live', () => {
+  const { db } = openPlatformDb(tempDir());
+  db.prepare(`INSERT INTO users (id, username, role, status, created_at) VALUES ('s1','s1','owner','active',?)`).run(
+    new Date().toISOString(),
+  );
+  const s = createSession(db, { userId: 's1' });
+  db.prepare('UPDATE sessions SET idle_expires_at = ? WHERE id = ?').run(
+    new Date(Date.now() - 1000).toISOString(),
+    s.id,
+  );
+  assert.equal(liveSessions(db).some((x) => x.id === s.id), false);
 });

@@ -135,7 +135,7 @@ export function enrollPage({ token, error = '' }) {
   });
 }
 
-export function enrollTotpPage({ secret, uri, error = '' }) {
+export function enrollTotpPage({ secret, uri, error = '', csrf = '' }) {
   return bare({
     title: 'Connect authenticator',
     body: `<div class="card">
@@ -144,6 +144,7 @@ export function enrollTotpPage({ secret, uri, error = '' }) {
 <p><strong>Setup key</strong><br><code>${esc(secret)}</code></p>
 <p class="muted" style="font-size:12px;word-break:break-all">${esc(uri)}</p>
 <form method="post" action="/enroll/totp">
+<input type="hidden" name="_csrf" value="${esc(csrf)}">
 <label for="code" class="muted">Enter the 6-digit code to confirm</label>
 <input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required autofocus>
 <p class="err">${esc(error)}</p>
@@ -153,7 +154,7 @@ export function enrollTotpPage({ secret, uri, error = '' }) {
   });
 }
 
-export function overviewPage({ user, apps, counts }) {
+export function overviewPage({ user, apps, counts, chain = { ok: true, checked: 0 } }) {
   const launcher =
     user.role === 'member'
       ? `<h2>Your applications</h2>${table(
@@ -175,7 +176,11 @@ export function overviewPage({ user, apps, counts }) {
 <p class="lede">${user.role === 'member' ? 'Launch an application, or review your own security.' : 'What needs attention, and what is in the estate.'}</p>
 ${launcher}
 <h2>Needs attention</h2>
-<div class="card"><p class="muted" style="margin:0">Nothing failed in the last 24 hours. The audit chain is verified on every request in this build.</p></div>`,
+<div class="card"><p style="margin:0">${
+      chain.ok
+        ? `<span class="tag">verified</span> Audit chain intact across ${chain.checked} events.`
+        : `<span class="tag" style="background:#fee4e2;color:#b42318">broken</span> Audit chain failed at event ${chain.brokenAt}.`
+    }</p></div>`,
   });
 }
 

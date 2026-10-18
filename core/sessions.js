@@ -11,7 +11,7 @@ const randomId = () => crypto.randomBytes(32).toString('base64url');
  * Create a session. `authLevel` 1 = a verified passkey assertion (reaches nothing but
  * the TOTP step); 2 = passkey + TOTP.
  */
-export function createSession(db, { userId, authLevel = 1, ip = null, uaHash = null }) {
+export function createSession(db, { userId, authLevel = 1, ip = null, uaHash = null, idleMs = IDLE_MS }) {
   const id = randomId();
   const now = Date.now();
   db.prepare(
@@ -26,7 +26,7 @@ export function createSession(db, { userId, authLevel = 1, ip = null, uaHash = n
     crypto.randomBytes(24).toString('base64url'),
     new Date(now).toISOString(),
     new Date(now).toISOString(),
-    new Date(now + IDLE_MS).toISOString(),
+    new Date(now + idleMs).toISOString(),
     new Date(now + ABSOLUTE_MS).toISOString(),
     ip,
     uaHash,
@@ -110,14 +110,18 @@ export function revokeAllForUser(db, userId) {
   );
 }
 
-export function liveSessions(db) {
+export function liveSessions(db, now = Date.now()) {
+  const iso = new Date(now).toISOString();
   return db
     .prepare(
       `SELECT s.id, s.auth_level, s.created_at, s.last_seen_at, s.idle_expires_at,
               u.username, u.role
          FROM sessions s JOIN users u ON u.id = s.user_id
         WHERE s.revoked_at IS NULL
+          AND s.idle_expires_at > ?
+          AND s.absolute_expires_at > ?
+          AND u.status = 'active'
         ORDER BY s.last_seen_at DESC`,
     )
-    .all();
+    .all(iso, iso);
 }

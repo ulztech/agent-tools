@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { appendEvent } from './chain.js';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -74,7 +75,9 @@ CREATE TABLE IF NOT EXISTS auth_events (
   factor TEXT,
   result TEXT NOT NULL,
   ip TEXT,
-  detail TEXT
+  detail TEXT,
+  prev_hash TEXT,
+  row_hash TEXT
 );
 
 CREATE TABLE IF NOT EXISTS applications (
@@ -128,10 +131,8 @@ export function openPlatformDb(dir = dataDir()) {
 
 export const nowIso = () => new Date().toISOString();
 
-export function audit(db, { userId = null, event, factor = null, result = 'ok', ip = null, detail = null }) {
-  db.prepare(
-    'INSERT INTO auth_events (ts, user_id, event, factor, result, ip, detail) VALUES (?,?,?,?,?,?,?)',
-  ).run(nowIso(), userId, event, factor, result, ip, detail);
+export function audit(db, event) {
+  return appendEvent(db, event);
 }
 
 export function findUser(db, username) {

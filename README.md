@@ -112,8 +112,11 @@ security, nothing else.
 second step; the session id rotates on elevation, so a cookie captured before the code is
 useless afterwards. TOTP is any standard app — add the setup key shown at enrolment.
 
-Not in this slice: recovery codes, QR rendering (the setup key is manual), and the
+Not in this slice: QR rendering (the setup key is manual), TOTP rotation, and the
 gateway inventory inside Tools/Policy — the gateway still owns it until C3.
+
+Every auth event is hash-chained (`prev_hash` → `row_hash`) and the Overview page reports
+the verification result, so tampering with an existing row is visible.
 
 ## Layout
 

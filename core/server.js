@@ -26,7 +26,8 @@ import { generateSecret, otpauthUri, verifyTotp } from './totp.js';
 import { open as openSealed, seal } from './secretbox.js';
 import { consumeCode, generateRecoveryCodes, remainingCodes, storeCodes } from './recovery.js';
 import { clearFailures, isLocked, recordFailure } from './throttle.js';
-import { consumeInvite, inviteByToken, issueInvite, pendingInvites } from './invites.js';
+import { issueInvite, consumeInvite, inviteByToken, pendingInvites } from './invites.js';
+import { verifyChain } from './chain.js';
 import {
   applicationsPage,
   auditPage,
@@ -182,26 +183,27 @@ export function createPlatformServer({ db, masterKey }) {
 
     if (path === '/auth/options' && req.method === 'POST') {
       const { username } = await readBody(req);
-      if (isLocked(db, `passkey:${String(username || '').toLowerCase()}`)) {
-        return sendJson(res, 429, { error: 'Too many attempts. Try again later.' });
-      }
+      // Deliberately no hard lock here: an unauthenticated caller could otherwise lock the
+      // only owner out. Brute force is bounded at the TOTP step, which needs the passkey.
       const { options } = await beginAuthentication(db, username);
       return sendJson(res, 200, { options });
     }
 
     if (path === '/auth/verify' && req.method === 'POST') {
       const { username, response } = await readBody(req);
-      const key = `passkey:${String(username || '').toLowerCase()}`;
       try {
         const { user } = await finishAuthentication(db, response);
-        clearFailures(db, key);
-        const session = createSession(db, { userId: user.id, authLevel: 1, ip: req.socket.remoteAddress });
+        const session = createSession(db, {
+          userId: user.id,
+          authLevel: 1,
+          ip: req.socket.remoteAddress,
+          idleMs: 5 * 60_000,
+        });
         db.prepare('UPDATE users SET last_login_at = ? WHERE id = ?').run(new Date().toISOString(), user.id);
         audit(db, { userId: user.id, event: 'login.passkey', factor: 'passkey', result: 'ok', ip: req.socket.remoteAddress });
         setSessionCookie(res, session.id);
         return sendJson(res, 200, { ok: true, next: '/login/totp' });
       } catch (err) {
-        recordFailure(db, key);
         audit(db, { userId: null, event: 'login.passkey', factor: 'passkey', result: 'fail', detail: err.code || err.message });
         throw err;
       }
@@ -228,7 +230,8 @@ export function createPlatformServer({ db, masterKey }) {
         'X-AT-User': session.user_id,
         'X-AT-Username': session.username,
         'X-AT-Roles': session.role,
-        'X-AT-Session': session.id,
+        'Cache-Control': 'no-store',
+        Vary: 'Cookie',
       });
       return res.end();
     }
@@ -265,7 +268,12 @@ export function createPlatformServer({ db, masterKey }) {
       db.prepare("UPDATE users SET status = 'active' WHERE id = ?").run(user.id);
       audit(db, { userId: user.id, event: 'cred.add', factor: 'passkey', result: 'ok' });
 
-      const session = createSession(db, { userId: user.id, authLevel: 1, ip: req.socket.remoteAddress });
+      const session = createSession(db, {
+        userId: user.id,
+        authLevel: 1,
+        ip: req.socket.remoteAddress,
+        idleMs: 5 * 60_000,
+      });
       setSessionCookie(res, session.id);
       return sendJson(res, 200, { ok: true, next: '/enroll/totp' });
     }
@@ -274,19 +282,49 @@ export function createPlatformServer({ db, masterKey }) {
       const session = sessionOf(req);
       if (!session) return redirect(res, '/login');
       const user = userById(db, session.user_id);
+      // A confirmed seed is never re-rendered: possession of factor one must not disclose
+      // factor two.
+      if (user.totp_confirmed_at) return redirect(res, '/');
       const secret = secretFor(user);
       if (!secret) return redirect(res, '/');
-      return sendHtml(res, 200, enrollTotpPage({ secret, uri: otpauthUri({ account: user.username, secret }) }));
+      return sendHtml(
+        res,
+        200,
+        enrollTotpPage({
+          secret,
+          uri: otpauthUri({ account: user.username, secret }),
+          csrf: session.csrf_token,
+        }),
+      );
     }
 
     if (path === '/enroll/totp' && req.method === 'POST') {
       const session = sessionOf(req);
       if (!session) return redirect(res, '/login');
       const user = userById(db, session.user_id);
+      if (user.totp_confirmed_at) return forbid(res, session, 'This account already has an authenticator.');
+      const body = await readBody(req);
+      if (!requireCsrf(session, res, body._csrf)) return undefined;
+
+      const key = `enroll-totp:${user.id}`;
+      if (isLocked(db, key)) {
+        const secret = secretFor(user);
+        return sendHtml(
+          res,
+          429,
+          enrollTotpPage({
+            secret,
+            uri: otpauthUri({ account: user.username, secret }),
+            csrf: session.csrf_token,
+            error: 'Too many attempts. Try again later.',
+          }),
+        );
+      }
+
       const secret = secretFor(user);
-      const { code } = await readBody(req);
-      const step = secret ? verifyTotp(secret, code, user.totp_last_step) : null;
+      const step = secret ? verifyTotp(secret, body.code, user.totp_last_step) : null;
       if (!step) {
+        recordFailure(db, key);
         audit(db, { userId: user.id, event: 'totp.enrol', factor: 'totp', result: 'fail' });
         return sendHtml(
           res,
@@ -294,10 +332,12 @@ export function createPlatformServer({ db, masterKey }) {
           enrollTotpPage({
             secret,
             uri: otpauthUri({ account: user.username, secret }),
+            csrf: session.csrf_token,
             error: 'That code did not match. Try the next one.',
           }),
         );
       }
+      clearFailures(db, key);
       db.prepare('UPDATE users SET totp_last_step = ?, totp_confirmed_at = ? WHERE id = ?').run(
         step,
         new Date().toISOString(),
@@ -401,8 +441,9 @@ export function createPlatformServer({ db, masterKey }) {
 
     if (path === '/step-up' && req.method === 'GET') {
       if (!requireL2(session, res)) return undefined;
-      const next = url.searchParams.get('next') || '/';
-      return sendHtml(res, 200, stepUpPage({ next: next.startsWith('/') ? next : '/', csrf: session.csrf_token }));
+      const raw = url.searchParams.get('next') || '/';
+      const next = /^\/(?!\/)/.test(raw) ? raw : '/';
+      return sendHtml(res, 200, stepUpPage({ next, csrf: session.csrf_token }));
     }
 
     if (path === '/auth/stepup/options' && req.method === 'POST') {
@@ -444,7 +485,7 @@ export function createPlatformServer({ db, masterKey }) {
         sessions: liveSessions(db).length,
         events: db.prepare('SELECT COUNT(*) AS n FROM auth_events').get().n,
       };
-      return sendHtml(res, 200, overviewPage({ user: session, apps, counts }));
+      return sendHtml(res, 200, overviewPage({ user: session, apps, counts, chain: verifyChain(db) }));
     }
 
     /* ---- people: collection actions ---- */
@@ -455,11 +496,15 @@ export function createPlatformServer({ db, masterKey }) {
       const body = await readBody(req);
       if (!requireCsrf(session, res, body._csrf)) return undefined;
       if (!requireStepUp(session, res, '/people')) return undefined;
+      const role = body.role || 'member';
+      if (!['owner', 'admin', 'auditor', 'member'].includes(role)) {
+        return forbid(res, session, 'That role is not valid.');
+      }
       const invite = issueInvite(db, {
         username: body.username,
-        role: body.role || 'member',
+        role,
         createdBy: session.user_id,
-        ttlMinutes: 60,
+        ttlMinutes: 15,
       });
       return sendHtml(
         res,
@@ -477,8 +522,9 @@ export function createPlatformServer({ db, masterKey }) {
       if (!requireOwner(session, res)) return undefined;
       const body = await readBody(req);
       if (!requireCsrf(session, res, body._csrf)) return undefined;
+      if (!requireStepUp(session, res, '/people')) return undefined;
       revokeSession(db, sessionRevoke[1]);
-      audit(db, { userId: session.user_id, event: 'session.revoke', result: 'ok', detail: `target=${sessionRevoke[1]}` });
+      audit(db, { userId: session.user_id, event: 'session.revoke', result: 'ok', detail: 'target=session' });
       return redirect(res, '/people');
     }
 
@@ -488,6 +534,7 @@ export function createPlatformServer({ db, masterKey }) {
       if (!requireOwner(session, res)) return undefined;
       const body = await readBody(req);
       if (!requireCsrf(session, res, body._csrf)) return undefined;
+      if (!requireStepUp(session, res, '/people')) return undefined;
       db.prepare('UPDATE invites SET used_at = ? WHERE id = ? AND used_at IS NULL').run(
         new Date().toISOString(),
         inviteRevoke[1],
