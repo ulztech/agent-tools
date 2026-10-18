@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const roots = ['src', 'test', 'scripts'];
+const roots = ['src', 'core', 'test', 'scripts'];
 const files = [];
 for (const root of roots) {
   if (!fs.existsSync(root)) continue;
@@ -33,11 +33,13 @@ if (failed > 0) {
   process.exit(1);
 }
 
-// The CLI must also resolve its import graph.
-const loaded = spawnSync(process.execPath, ['src/cli.js'], { encoding: 'utf8' });
-if (loaded.status !== 2) {
-  process.stderr.write(`\n✗ src/cli.js did not load cleanly\n${loaded.stderr || loaded.stdout}\n`);
-  process.exit(1);
+// Each entry point must also resolve its import graph.
+for (const entry of ['src/cli.js', 'core/cli.js']) {
+  const loaded = spawnSync(process.execPath, [entry], { encoding: 'utf8' });
+  if (loaded.status !== 2) {
+    process.stderr.write(`\n✗ ${entry} did not load cleanly\n${loaded.stderr || loaded.stdout}\n`);
+    process.exit(1);
+  }
 }
 
 process.stdout.write(`build ok — ${unique.length} modules parsed, cli loaded\n`);

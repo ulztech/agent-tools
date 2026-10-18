@@ -91,6 +91,30 @@ node src/cli.js audit verify
 node src/cli.js jwks
 ```
 
+## Platform console (C1)
+
+The identity core and the admin console live in `core/`.
+
+```bash
+npm run platform:init -- --username ulcon --display-name "Ulcon"
+# prints a one-time /enroll?token=... URL — open it once
+
+npm run platform
+# listening on http://127.0.0.1:8443 (loopback only)
+npm run platform:users
+```
+
+**Menu:** Overview · People · Tools · Applications · Policy · Audit · Settings —
+role-filtered, subtraction only. A `member` sees the application launcher and their own
+security, nothing else.
+
+**Sign-in is passkey → TOTP.** An L1 session (passkey only) reaches nothing but the
+second step; the session id rotates on elevation, so a cookie captured before the code is
+useless afterwards. TOTP is any standard app — add the setup key shown at enrolment.
+
+Not in this slice: recovery codes, QR rendering (the setup key is manual), and the
+gateway inventory inside Tools/Policy — the gateway still owns it until C3.
+
 ## Layout
 
 ```
@@ -102,8 +126,17 @@ src/
   masking.js    registry, strategies, PII detector (audit-only)
   query.js      the data path: capability -> gate -> driver -> mask -> audit
   drivers.js    stub (tests) and MySQL adapter
-  cli.js        admin CLI
-test/           unit, capability, audit, gate, masking, adversarial
+  cli.js        gateway admin CLI
+core/
+  db.js         platform schema (users, passkeys, sessions, invites, apps)
+  webauthn.js   registration + assertion, RP ID pinned, UV required
+  totp.js       RFC 6238, ±1 step, replay-blocked
+  sessions.js   L1/L2, idle + absolute expiry, id rotation on elevation
+  nav.js        the seven-section menu and role filtering
+  server.js     login, enrolment, console routes, forward-auth
+  views.js      server-rendered pages
+  cli.js        init / invite / users / serve
+test/           gateway, capability, masking, adversarial, identity
 ```
 
 ## Status
