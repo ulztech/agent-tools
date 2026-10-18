@@ -229,6 +229,54 @@ test('masking: a join of two derived tables keeps positions aligned', () => {
   assert.equal(out.rows[0]['upper(email)'], REDACTED);
 });
 
+test('masking: star-branch join cannot hide an expression (verifier finding)', () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const out = maskRows({
+    rows: [{ employee_id: 'emp-1', 'upper(email)': 'MARIA@EXAMPLE.COM' }],
+    fields: ['employee_id', 'upper(email)'],
+    sql: 'select * from (select * from employee) x join (select upper(email) from t2) y',
+    registry: registryOf(s),
+    salt: 'salt',
+  });
+  assert.equal(out.rows[0]['upper(email)'], REDACTED);
+});
+
+test('masking: base table joined to a derived expression fails safe', () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const out = maskRows({
+    rows: [{ employee_id: 'emp-1', 'concat(first_name,last_name)': 'MariaSantos' }],
+    fields: ['employee_id', 'concat(first_name,last_name)'],
+    sql: 'select * from employee e join (select concat(first_name,last_name) from t2) x',
+    registry: registryOf(s),
+    salt: 'salt',
+  });
+  assert.equal(out.rows[0]['concat(first_name,last_name)'], REDACTED);
+});
+
+test('masking: CTE feeding a derived star fails safe', () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const out = maskRows({
+    rows: [{ 'concat(first_name,last_name)': 'JuanDelaCruz' }],
+    fields: ['concat(first_name,last_name)'],
+    sql: 'with c as (select concat(first_name,last_name) from employee) select * from (select * from c) d',
+    registry: registryOf(s),
+    salt: 'salt',
+  });
+  assert.equal(out.rows[0]['concat(first_name,last_name)'], REDACTED);
+});
+
+test('masking: union of stars fails safe', () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const out = maskRows({
+    rows: [{ dept: 'pedro.reyes@example.com' }],
+    fields: ['dept'],
+    sql: 'select * from employee union all select * from t3',
+    registry: registryOf(s),
+    salt: 'salt',
+  });
+  assert.equal(out.rows[0].dept, REDACTED);
+});
+
 test('masking: a derived-table alias cannot launder a masked column', () => {
   const s = setup({ registry: DEFAULT_REGISTRY });
   const out = maskRows({

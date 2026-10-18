@@ -33,6 +33,10 @@ agent ──query──► gateway ──► read-only gate ──► database
   never values or raw parameters.
 - **No agent can reach the settings.** There is no tool, resource or endpoint that
   exposes connections, the registry, users, or vault contents.
+- **Unknowable shapes fail safe.** When the gateway cannot prove which output column maps
+  to a registry column — a `*` mixed with other items, a join across a base table and a
+  derived table, a union of stars, a nested derived chain — it **redacts every column**
+  rather than guess. That is over-masking, never a leak.
 
 ## What this does **not** protect
 

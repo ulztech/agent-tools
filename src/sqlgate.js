@@ -371,35 +371,56 @@ export function analyzeProjection(sql) {
     }
   }
 
-  // `select * from ( … ) t` gives no names to match on, and an unaliased expression's
-  // driver column name is the expression text, which we cannot reproduce. Map the star's
-  // columns **by position** to the immediate derived select's items instead.
+  // `select *` gives no names to match on, and an unaliased expression's driver column
+  // name is the expression text, which we cannot reproduce. So star columns are mapped
+  // **by position** — but only when that mapping is provably exact:
   //
-  // Two shapes make the positions unknowable:
-  //   - the immediate derived select mixes `*` with other items (the star expands to N
-  //     driver columns but consumes one parsed item, shifting every later index)
-  //   - the derived chain is nested two or more deep, so an inner `*` can hide expressions
-  // For those we refuse to guess, and the masker redacts every column rather than leak.
+  //   exact = one derived source, no join, no union, and no `*` inside the derived select
+  //
+  // Anything else (a `*` mixed with items, a join, a union, a nested derived chain, a CTE
+  // feeding a derived) makes positions unknowable. Rather than guess, we redact every
+  // column. Over-masking never blocks a result; under-masking breaks the only promise.
   let positionalUnknown = false;
   if (star) {
     const immediate = selects.filter((s) => s.depth === 1);
-    if (immediate.length > 0) {
-      const hasStar = immediate.some((s) => s.items.some((i) => i.star));
-      const shiftRisk = immediate.some((s) => s.items.length > 1 && s.items.some((i) => i.star));
-      const nested = selects.some((s) => s.depth >= 2);
-      if (hasStar && (shiftRisk || nested)) {
-        positionalUnknown = true;
-      } else if (!hasStar) {
+    const nested = selects.some((s) => s.depth >= 2);
+    const hasUnion = tokens.some(
+      (t) => t.type === 'word' && ['union', 'intersect', 'except'].includes(t.value.toLowerCase()),
+    );
+
+    // How many sources are joined, and is each one a derived select or a base table?
+    const sourceKinds = [];
+    for (let i = 0; i < tokens.length; i += 1) {
+      if (depths[i] !== 0) continue;
+      const t = tokens[i];
+      if (t.type !== 'word') continue;
+      const w = t.value.toLowerCase();
+      if (w !== 'from' && w !== 'join' && w !== 'straight_join') continue;
+      const next = tokens[i + 1];
+      sourceKinds.push(next && next.type === 'punct' && next.value === '(' ? 'derived' : 'base');
+    }
+
+    const allDerived = sourceKinds.length > 0 && sourceKinds.every((k) => k === 'derived');
+    const anyStarInside = immediate.some((s) => s.items.some((i) => i.star));
+    const singlePureStar =
+      immediate.length === 1 && immediate[0].items.length === 1 && immediate[0].items[0].star && !nested;
+    const complex = selects.length > 1 || hasUnion || sourceKinds.length > 1;
+
+    if (complex) {
+      if (singlePureStar) {
+        // `select * from (select * from employee) t` — the inner star resolves to real
+        // base-table column names, so the name fallback is exact.
+      } else if (!hasUnion && allDerived && !anyStarInside && !nested) {
         byPosition.length = 0;
         for (const s of immediate) {
-          for (const item of s.items) {
-            byPosition.push(item.star ? new Set() : expand(item.sources || []));
-          }
+          for (const item of s.items) byPosition.push(expand(item.sources || []));
         }
+      } else {
+        positionalUnknown = true;
       }
-      // else: a single pure star over a base table — driver names are real column names,
-      // so the name fallback in the masker is exact.
     }
+    // A star with no derived source (`select * from employee`) needs no plan: the driver
+    // returns real column names, so the masker's name fallback is exact.
   }
 
   return { tokens, star, branches, byOutput, byPosition, derived, positionalUnknown };
