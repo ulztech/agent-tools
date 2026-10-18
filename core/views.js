@@ -60,7 +60,7 @@ function shell({ title, user, active, body, csrf = '' }) {
 <header><span class="brand">Agent-tools</span>
 <span class="who">${user ? `${esc(user.username)} · <span class="tag">${esc(user.role)}</span>` : 'not signed in'}${
     user
-      ? `<form method="post" action="/auth/logout" style="display:inline;margin-left:12px"><input type="hidden" name="_csrf" value="${esc(csrf)}"><button class="ghost" type="submit" style="padding:3px 9px">Sign out</button></form>`
+      ? `<a href="/me/security" style="margin-left:12px;font-size:12.5px">My security</a><form method="post" action="/auth/logout" style="display:inline;margin-left:12px"><input type="hidden" name="_csrf" value="${esc(csrf)}"><button class="ghost" type="submit" style="padding:3px 9px">Sign out</button></form>`
       : ''
   }</span>
 </header>
@@ -439,8 +439,15 @@ export function meSecurityPage({ user, creds, totpConfirmed, recoveryRemaining =
     body: `<h1>My security</h1><p class="lede">Your passkeys and second factor.</p>
 <h2>Passkeys</h2>
 ${table(
-  ['Passkey', 'Created', 'Last used'],
-  creds.map((c) => [`<code>${esc(c.nickname || c.id)}</code>`, esc(c.created_at), esc(c.last_used_at || '—')]),
+  ['Passkey', 'Created', 'Last used', ''],
+  creds.map((c) => [
+    `<code>${esc(c.nickname || c.id)}</code>`,
+    esc(c.created_at),
+    esc(c.last_used_at || '—'),
+    creds.length > 1
+      ? `<form method="post" action="/me/security/passkeys/${esc(c.id)}/remove" style="margin:0"><input type="hidden" name="_csrf" value="${esc(user.csrf_token)}"><button class="ghost" type="submit">Remove</button></form>`
+      : '',
+  ]),
 )}
 <h2>Authenticator app</h2>
 <div class="card"><p style="margin:0">${

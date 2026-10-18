@@ -32,7 +32,48 @@ export function createSession(db, { userId, authLevel = 1, ip = null, uaHash = n
     ip,
     uaHash,
   );
+
+  // Max three concurrent sessions per user: the oldest is retired.
+  const extra = db
+    .prepare('SELECT id FROM sessions WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at DESC')
+    .all(userId)
+    .slice(3);
+  for (const row of extra) {
+    db.prepare('UPDATE sessions SET revoked_at = ? WHERE id = ?').run(new Date(now).toISOString(), row.id);
+  }
+
   return loadSession(db, id, now);
+}
+
+/**
+ * Rotate a session id without changing its level. Used on step-up, so a cookie captured
+ * before the fresh passkey check cannot ride the elevated state.
+ */
+export function rotateSession(db, id, now = Date.now()) {
+  const row = db.prepare('SELECT * FROM sessions WHERE id = ?').get(id);
+  if (!row) return null;
+  const newId = randomId();
+  db.prepare(
+    `INSERT INTO sessions
+       (id, user_id, auth_level, csrf_token, created_at, last_seen_at,
+        idle_expires_at, absolute_expires_at, step_up_until, idle_ms, ip, ua_hash, revoked_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NULL)`,
+  ).run(
+    newId,
+    row.user_id,
+    row.auth_level,
+    crypto.randomBytes(24).toString('base64url'),
+    row.created_at,
+    new Date(now).toISOString(),
+    new Date(now + (row.idle_ms || IDLE_MS)).toISOString(),
+    row.absolute_expires_at,
+    row.step_up_until,
+    row.idle_ms || IDLE_MS,
+    row.ip,
+    row.ua_hash,
+  );
+  db.prepare('UPDATE sessions SET revoked_at = ? WHERE id = ?').run(new Date(now).toISOString(), id);
+  return loadSession(db, newId, now);
 }
 
 export function loadSession(db, id, now = Date.now()) {

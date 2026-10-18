@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import {
   generateAuthenticationOptions,
   generateRegistrationOptions,
@@ -16,7 +17,7 @@ export function rpConfig() {
 
 export class AuthError extends Error {
   constructor(code, message) {
-    super(message);
+    super(`[${code}] ${message}`);
     this.code = code;
   }
 }
@@ -134,14 +135,17 @@ export async function beginAuthentication(db, username) {
   const creds = usable ? credentialsFor(db, user.id) : [];
 
   // Unknown or inactive users get a decoy challenge with no allowed credentials, so the
-  // response shape and timing do not reveal whether the account exists.
+  // response shape and timing do not reveal whether the account exists. The list is never
+  // empty: an empty `allowCredentials` would itself be the oracle.
+  const allowCredentials =
+    creds.length > 0
+      ? creds.map((c) => ({ id: c.credential_id, transports: JSON.parse(c.transports || '[]') }))
+      : [{ id: crypto.randomBytes(32).toString('base64url'), type: 'public-key', transports: ['internal'] }];
+
   const options = await generateAuthenticationOptions({
     rpID,
     userVerification: 'required',
-    allowCredentials: creds.map((c) => ({
-      id: c.credential_id,
-      transports: JSON.parse(c.transports || '[]'),
-    })),
+    allowCredentials,
   });
   storeChallenge(db, {
     challenge: options.challenge,

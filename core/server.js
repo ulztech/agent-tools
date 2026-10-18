@@ -10,6 +10,7 @@ import {
   loadSession,
   markStepUp,
   revokeAllForUser,
+  rotateSession,
   revokeSession,
   touchSession,
 } from './sessions.js';
@@ -166,6 +167,15 @@ export function createPlatformServer({ db, masterKey }) {
   async function route(req, res) {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     const path = url.pathname;
+
+    // Browsers send Origin on cross-origin POSTs. A mismatched origin is never a
+    // legitimate console request.
+    if (req.method === 'POST') {
+      const origin = req.headers.origin;
+      if (origin && origin !== rp.origin) {
+        return sendHtml(res, 403, errorPage({ status: 403, message: 'Cross-origin request refused.' }));
+      }
+    }
 
     /* ---------------- public ---------------- */
 
@@ -470,7 +480,9 @@ export function createPlatformServer({ db, masterKey }) {
       const { response } = await readBody(req);
       const { user } = await finishAuthentication(db, response);
       if (user.id !== session.user_id) return sendJson(res, 403, { error: 'Step-up used a different account' });
-      markStepUp(db, session.id);
+      const rotated = rotateSession(db, session.id);
+      markStepUp(db, rotated.id);
+      setSessionCookie(res, rotated.id);
       audit(db, { userId: user.id, event: 'stepup.ok', factor: 'passkey', result: 'ok' });
       return sendJson(res, 200, { ok: true });
     }
@@ -667,6 +679,25 @@ export function createPlatformServer({ db, masterKey }) {
       const section = sections[path];
       if (!requireSection(session, res, section.key)) return undefined;
       return sendHtml(res, 200, section.render());
+    }
+
+    const passkeyRemove = path.match(/^\/me\/security\/passkeys\/([^/]+)\/remove$/);
+    if (passkeyRemove && req.method === 'POST') {
+      const body = await readBody(req);
+      if (!requireCsrf(session, res, body._csrf)) return undefined;
+      if (!requireStepUp(session, res, '/me/security')) return undefined;
+      const owned = db.prepare('SELECT * FROM webauthn_creds WHERE user_id = ?').all(session.user_id);
+      if (owned.length <= 1) return forbid(res, session, 'You cannot remove your only passkey.');
+      const info = db
+        .prepare('DELETE FROM webauthn_creds WHERE id = ? AND user_id = ?')
+        .run(passkeyRemove[1], session.user_id);
+      audit(db, {
+        userId: session.user_id,
+        event: 'cred.remove',
+        factor: 'passkey',
+        result: Number(info.changes) === 1 ? 'ok' : 'missing',
+      });
+      return redirect(res, '/me/security');
     }
 
     if (path === '/me/security') {

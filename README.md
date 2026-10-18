@@ -146,9 +146,11 @@ test/           gateway, capability, masking, adversarial, identity
 
 ## Status
 
-Phase A + B of the platform plan (`2026-10-18-agent-tools-platform.md`): data path,
-capability issuance, masking engine, audit chain, CLI. The admin console, WebAuthn
-passkeys, the MCP endpoint and the platform control plane are later phases.
+Phase A + B of the platform plan, plus A2 (service passkeys) and C1+C2 of the identity
+layer: passkey registration and assertion, TOTP, recovery codes, step-up, invites,
+session management, role-based console, forward-auth for applications, and a
+hash-chained auth log. Later phases: network isolation (C3), gateway inventory inside
+the console, MCP transport, and signing-key rotation.
 
 ## License
 

@@ -479,3 +479,50 @@ test('server: a backslash in next= cannot become a protocol-relative redirect', 
     server.close();
   }
 });
+test('server: a mismatched Origin header is refused', async () => {
+  const { server, base } = await boot();
+  try {
+    const res = await fetch(`${base}/auth/options`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: 'http://evil.example' },
+      body: '{}',
+    });
+    assert.equal(res.status, 403);
+  } finally {
+    server.close();
+  }
+});
+
+test('server: a passkey can be removed, but never the last one', async () => {
+  const { server, cookieFor, post, db, ids } = await boot();
+  try {
+    const add = (id) =>
+      db.prepare(
+        `INSERT INTO webauthn_creds (id, user_id, credential_id, public_key, counter, transports, created_at)
+         VALUES (?,?,?,?,0,'[]',?)`,
+      ).run(id, ids.member1, `cred-${id}`, 'AA', new Date().toISOString());
+    add('pk1');
+    add('pk2');
+
+    const owner = cookieFor('owner1');
+    markStepUp(db, owner.session.id);
+    const target = cookieFor('member1');
+    markStepUp(db, target.session.id);
+
+    const first = await post('/me/security/passkeys/pk1/remove', {
+      cookie: target.header,
+      form: { _csrf: target.session.csrf_token },
+    });
+    assert.equal(first.status, 303);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM webauthn_creds WHERE user_id = ?').get(ids.member1).n, 1);
+
+    const last = await post('/me/security/passkeys/pk2/remove', {
+      cookie: target.header,
+      form: { _csrf: target.session.csrf_token },
+    });
+    assert.equal(last.status, 403);
+    void owner;
+  } finally {
+    server.close();
+  }
+});
