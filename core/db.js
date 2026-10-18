@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS users (
   created_at TEXT NOT NULL,
   last_login_at TEXT,
   disabled_at TEXT,
+  password_hash TEXT,
   totp_secret TEXT,
   totp_last_step INTEGER NOT NULL DEFAULT 0,
   totp_confirmed_at TEXT
@@ -48,6 +49,16 @@ CREATE TABLE IF NOT EXISTS sessions (
   idle_ms INTEGER NOT NULL DEFAULT 900000,
   ip TEXT,
   ua_hash TEXT,
+  revoked_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS remember_tokens (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  last_used_at TEXT,
   revoked_at TEXT
 );
 

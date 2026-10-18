@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { SESSION_COOKIE, loadSession, touchSession } from './sessions.js';
+import { SESSION_COOKIE, loadSession, sessionCookieName, touchSession } from './sessions.js';
 
 function parseCookies(header) {
   const out = {};
@@ -21,7 +21,7 @@ function parseCookies(header) {
  */
 export function authzDecision(db, req) {
   const cookies = parseCookies(req.headers.cookie);
-  const session = loadSession(db, cookies[SESSION_COOKIE]);
+  const session = loadSession(db, cookies[sessionCookieName()] || cookies[SESSION_COOKIE]);
   if (!session || session.auth_level < 2) return { status: 401, headers: {} };
   touchSession(db, session.id);
 

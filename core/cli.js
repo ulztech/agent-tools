@@ -47,7 +47,7 @@ async function main() {
       return fail('E_INITIALISED', 'this platform already has users; use `invite` instead');
     }
     loadMasterKey(dir);
-    const username = values.username || 'owner';
+    const username = values.username || null;
     const invite = issueInvite(db, {
       username,
       role: 'owner',

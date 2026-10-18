@@ -1,6 +1,6 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
-import { audit, listApplications, seedDurablePi, userById } from './db.js';
+import { audit, findUser, listApplications, seedDurablePi, userById } from './db.js';
 import {
   SESSION_COOKIE,
   createSession,
@@ -12,6 +12,8 @@ import {
   revokeAllForUser,
   revokeOtherSessions,
   rotateSession,
+  sessionCookieName,
+  sessionCookieSecure,
   revokeSession,
   touchSession,
 } from './sessions.js';
@@ -31,14 +33,25 @@ import { clearFailures, isLocked, recordFailure } from './throttle.js';
 import { issueInvite, consumeInvite, inviteByToken, pendingInvites } from './invites.js';
 import { verifyChain } from './chain.js';
 import { probeUpstream, readInventory, readSigningKey } from './inventory.js';
+import { qrSvg } from './qr.js';
+import { hashPassword, verifyPassword } from './passwords.js';
+import {
+  REMEMBER_COOKIE,
+  issueRememberToken,
+  listRemembered,
+  resolveRememberToken,
+  revokeRememberToken,
+} from './remember.js';
 import { authzDecision } from './authz.js';
 import {
   applicationsPage,
   auditPage,
   enrollPage,
+  enrollPasswordPage,
   enrollTotpPage,
   errorPage,
   inviteCreatedPage,
+  setAuthMode,
   loginPage,
   meActivityPage,
   meSecurityPage,
@@ -53,7 +66,8 @@ import {
   totpLoginPage,
   userDetailPage,
 } from './views.js';
-import { ENROLL_JS, LOGIN_JS, STEPUP_JS } from './assets.js';
+import QRCode from 'qrcode';
+import { COPY_JS, ENROLL_JS, LOGIN_JS, RECOVERY_JS, STEPUP_JS } from './assets.js';
 
 const MAX_BODY = 1_000_000;
 
@@ -84,11 +98,21 @@ function parseCookies(header) {
   return out;
 }
 
+function appendCookie(res, value) {
+  const previous = res.getHeader('Set-Cookie');
+  res.setHeader('Set-Cookie', previous ? [].concat(previous, value) : value);
+}
+
 function setSessionCookie(res, id) {
-  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${id}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=28800`);
+  const secure = sessionCookieSecure() ? ' Secure;' : '';
+  appendCookie(
+    res,
+    `${sessionCookieName()}=${id}; Path=/; HttpOnly;${secure} SameSite=Strict; Max-Age=28800`,
+  );
 }
 function clearSessionCookie(res) {
-  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`);
+  const secure = sessionCookieSecure() ? ' Secure;' : '';
+  appendCookie(res, `${sessionCookieName()}=; Path=/; HttpOnly;${secure} SameSite=Strict; Max-Age=0`);
 }
 
 async function readBody(req) {
@@ -113,16 +137,46 @@ function sameToken(a, b) {
 
 export function createPlatformServer({ db, masterKey }) {
   const rp = rpConfig();
+  const configuredMode = process.env.AT_AUTH_MODE;
+  const authMode =
+    configuredMode === 'password'
+      ? 'password+totp'
+      : configuredMode === 'totp'
+        ? 'totp'
+        : 'passkey+totp';
+  setAuthMode(authMode);
   seedDurablePi(db);
 
   const sessionOf = (req) => {
     const cookies = parseCookies(req.headers.cookie);
-    const session = loadSession(db, cookies[SESSION_COOKIE]);
+    const session = loadSession(db, cookies[sessionCookieName()] || cookies[SESSION_COOKIE]);
     if (session) touchSession(db, session.id);
     return session;
   };
 
   const secretFor = (user) => (user.totp_secret ? openSealed(masterKey, user.totp_secret, user.id) : null);
+
+  const rememberCookieName = () => (sessionCookieSecure() ? REMEMBER_COOKIE : 'at_remember');
+
+  const setRememberCookie = (res, token) => {
+    const secure = sessionCookieSecure() ? ' Secure;' : '';
+    appendCookie(
+      res,
+      `${rememberCookieName()}=${token}; Path=/; HttpOnly;${secure} SameSite=Strict; Max-Age=${30 * 24 * 3600}`,
+    );
+  };
+
+  const renderTotpEnrol = async (res, status, user, session, error = '') => {
+    const secret = secretFor(user);
+    const uri = otpauthUri({ account: user.username, secret });
+    let qr = '';
+    try {
+      qr = await qrSvg(uri);
+    } catch {
+      // The setup key below the QR is the fallback.
+    }
+    return sendHtml(res, status, enrollTotpPage({ secret, uri, qr, csrf: session.csrf_token, error }));
+  };
 
   const forbid = (res, session, message) =>
     sendHtml(res, 403, errorPage({ status: 403, message, user: session }));
@@ -174,10 +228,21 @@ export function createPlatformServer({ db, masterKey }) {
 
     // Browsers send Origin on cross-origin POSTs. A mismatched origin is never a
     // legitimate console request.
+    // Same-origin check against the host the request actually arrived on. Comparing to
+    // AT_ORIGIN was too strict: localhost and 127.0.0.1 are the same server, and a
+    // reverse proxy presents its own host. A cross-site POST still fails here.
     if (req.method === 'POST') {
       const origin = req.headers.origin;
-      if (origin && origin !== rp.origin) {
-        return sendHtml(res, 403, errorPage({ status: 403, message: 'Cross-origin request refused.' }));
+      if (origin) {
+        let sameHost = false;
+        try {
+          sameHost = new URL(origin).host === req.headers.host;
+        } catch {
+          sameHost = false;
+        }
+        if (!sameHost) {
+          return sendHtml(res, 403, errorPage({ status: 403, message: 'Cross-origin request refused.' }));
+        }
       }
     }
 
@@ -185,14 +250,97 @@ export function createPlatformServer({ db, masterKey }) {
 
     if (path === '/healthz') return sendJson(res, 200, { ok: true });
 
-    const assets = { '/assets/login.js': LOGIN_JS, '/assets/enroll.js': ENROLL_JS, '/assets/stepup.js': STEPUP_JS };
+    const assets = {
+      '/assets/login.js': LOGIN_JS,
+      '/assets/enroll.js': ENROLL_JS,
+      '/assets/stepup.js': STEPUP_JS,
+      '/assets/copy.js': COPY_JS,
+      '/assets/recovery.js': RECOVERY_JS,
+    };
     if (assets[path]) return send(res, 200, assets[path], { 'content-type': 'text/javascript; charset=utf-8' });
 
     if (path === '/login' && req.method === 'GET') {
       const session = sessionOf(req);
       if (session?.auth_level >= 2) return redirect(res, '/');
       if (session?.auth_level === 1) return redirect(res, '/login/totp');
-      return sendHtml(res, 200, loginPage());
+
+      if (authMode === 'password+totp' && !url.searchParams.get('switch')) {
+        const cookies = parseCookies(req.headers.cookie);
+        const remembered = resolveRememberToken(db, cookies[rememberCookieName()]);
+        const rememberedUser = remembered ? userById(db, remembered.user_id) : null;
+        if (rememberedUser && rememberedUser.status === 'active') {
+          return sendHtml(res, 200, loginPage({ mode: authMode, remembered: rememberedUser.username }));
+        }
+      }
+      return sendHtml(res, 200, loginPage({ mode: authMode }));
+    }
+
+    if (path === '/auth/password' && req.method === 'POST') {
+      if (authMode !== 'password+totp') return redirect(res, '/login');
+      const body = await readBody(req);
+      const key = `password:${String(body.username || '').toLowerCase()}`;
+      if (isLocked(db, key)) {
+        return sendHtml(res, 429, loginPage({ mode: authMode, error: 'Too many attempts. Try again later.' }));
+      }
+      const user = findUser(db, body.username);
+      const ok =
+        Boolean(user) &&
+        user.status === 'active' &&
+        Boolean(user.password_hash) &&
+        verifyPassword(body.password, user.password_hash);
+      if (!ok) {
+        recordFailure(db, key);
+        audit(db, { userId: null, event: 'login.password', factor: 'password', result: 'fail' });
+        return sendHtml(res, 401, loginPage({ mode: authMode, error: 'Username or password is incorrect.' }));
+      }
+      clearFailures(db, key);
+      const session = createSession(db, {
+        userId: user.id,
+        authLevel: 1,
+        idleMs: 5 * 60_000,
+        ip: req.socket.remoteAddress,
+      });
+      setSessionCookie(res, session.id);
+      audit(db, { userId: user.id, event: 'login.password', factor: 'password', result: 'ok' });
+      return redirect(res, '/login/totp');
+    }
+
+    if (path === '/auth/remember' && req.method === 'POST') {
+      if (authMode !== 'password+totp') return redirect(res, '/login');
+      const cookies = parseCookies(req.headers.cookie);
+      const remembered = resolveRememberToken(db, cookies[rememberCookieName()]);
+      const user = remembered ? userById(db, remembered.user_id) : null;
+      if (!user || user.status !== 'active') return redirect(res, '/login');
+      const session = createSession(db, {
+        userId: user.id,
+        authLevel: 1,
+        idleMs: 5 * 60_000,
+        ip: req.socket.remoteAddress,
+      });
+      setSessionCookie(res, session.id);
+      audit(db, { userId: user.id, event: 'login.remembered', factor: 'cookie', result: 'ok' });
+      return redirect(res, '/login/totp');
+    }
+
+    // TOTP-only evaluation mode: username -> pending session -> authenticator code.
+    if (path === '/auth/start' && req.method === 'POST') {
+      if (authMode !== 'totp') return sendJson(res, 404, { error: 'not enabled' });
+      const { username } = await readBody(req);
+      const user = findUser(db, username);
+      if (user && user.status === 'active') {
+        const session = createSession(db, {
+          userId: user.id,
+          authLevel: 1,
+          idleMs: 5 * 60_000,
+          ip: req.socket.remoteAddress,
+        });
+        setSessionCookie(res, session.id);
+        audit(db, { userId: user.id, event: 'login.start', factor: 'totp', result: 'ok' });
+      } else {
+        audit(db, { userId: null, event: 'login.start', factor: 'totp', result: 'unknown' });
+      }
+      // Same response either way; the cookie is what differs.
+      return sendJson(res, 200, { ok: true, next: '/login/totp' });
     }
 
     if (path === '/auth/options' && req.method === 'POST') {
@@ -240,10 +388,132 @@ export function createPlatformServer({ db, masterKey }) {
     /* ---------------- enrolment ---------------- */
 
     if (path === '/enroll' && req.method === 'GET') {
-      if (!inviteByToken(db, url.searchParams.get('token'))) {
+      const invite = inviteByToken(db, url.searchParams.get('token'));
+      if (!invite) {
         return sendHtml(res, 400, errorPage({ status: 400, message: 'This invite is invalid or has expired.' }));
       }
-      return sendHtml(res, 200, enrollPage({ token: url.searchParams.get('token') }));
+      if (authMode === 'password+totp') {
+        const invited = userById(db, invite.user_id);
+        const choosable = !invited || String(invited.username).startsWith('pending_');
+        return sendHtml(
+          res,
+          200,
+          enrollPasswordPage({
+            token: url.searchParams.get('token'),
+            username: choosable ? null : invited.username,
+          }),
+        );
+      }
+      return sendHtml(res, 200, enrollPage({ token: url.searchParams.get('token'), mode: authMode }));
+    }
+
+    if (path === '/enroll/password' && req.method === 'POST') {
+      if (authMode !== 'password+totp') return redirect(res, '/login');
+      const body = await readBody(req);
+      const invite = inviteByToken(db, body.token);
+      if (!invite) {
+        return sendHtml(res, 400, errorPage({ status: 400, message: 'This invite is invalid or has expired.' }));
+      }
+      const user = userById(db, invite.user_id);
+      const pending = String(user.username).startsWith('pending_');
+      let chosen = user.username;
+      if (pending) {
+        chosen = String(body.username || '').trim().toLowerCase();
+        if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(chosen)) {
+          return sendHtml(
+            res,
+            400,
+            enrollPasswordPage({
+              token: body.token,
+              username: null,
+              error: 'Choose a username: lowercase letters, digits, dot, underscore or hyphen.',
+            }),
+          );
+        }
+        const taken = db.prepare('SELECT id FROM users WHERE username = ? AND id != ?').get(chosen, user.id);
+        if (taken) {
+          return sendHtml(
+            res,
+            400,
+            enrollPasswordPage({ token: body.token, username: null, error: 'That username is already taken.' }),
+          );
+        }
+      }
+      if (body.password !== body.confirm) {
+        return sendHtml(
+          res,
+          400,
+          enrollPasswordPage({
+            token: body.token,
+            username: pending ? null : user.username,
+            error: 'Passwords do not match.',
+          }),
+        );
+      }
+      let hash;
+      try {
+        hash = hashPassword(body.password, chosen);
+      } catch (err) {
+        return sendHtml(
+          res,
+          400,
+          enrollPasswordPage({
+            token: body.token,
+            username: pending ? null : user.username,
+            error: err.message,
+          }),
+        );
+      }
+      consumeInvite(db, body.token);
+      if (pending) {
+        db.prepare(
+          "UPDATE users SET username = ?, display_name = ?, password_hash = ?, status = 'active' WHERE id = ?",
+        ).run(chosen, chosen, hash, user.id);
+      } else {
+        db.prepare("UPDATE users SET password_hash = ?, status = 'active' WHERE id = ?").run(hash, user.id);
+      }
+      if (!userById(db, user.id).totp_secret) {
+        const secret = generateSecret();
+        db.prepare('UPDATE users SET totp_secret = ? WHERE id = ?').run(
+          seal(masterKey, secret, user.id),
+          user.id,
+        );
+      }
+      audit(db, { userId: user.id, event: 'user.password', factor: 'password', result: 'ok' });
+      const session = createSession(db, {
+        userId: user.id,
+        authLevel: 1,
+        idleMs: 5 * 60_000,
+        ip: req.socket.remoteAddress,
+      });
+      setSessionCookie(res, session.id);
+      return redirect(res, '/enroll/totp');
+    }
+
+    if (path === '/enroll/start-totp' && req.method === 'POST') {
+      if (authMode !== 'totp') return sendJson(res, 404, { error: 'not enabled' });
+      const { token } = await readBody(req);
+      const invite = consumeInvite(db, token);
+      if (!invite) throw new AuthError('E_INVITE', 'invite is invalid, expired or already used');
+      const user = userById(db, invite.user_id);
+      if (!user.totp_secret) {
+        const secret = generateSecret();
+        db.prepare('UPDATE users SET totp_secret = ? WHERE id = ?').run(
+          seal(masterKey, secret, user.id),
+          user.id,
+        );
+      }
+      db.prepare("UPDATE users SET status = 'active' WHERE id = ?").run(user.id);
+      audit(db, { userId: user.id, event: 'totp.enrol', factor: 'totp', result: 'start' });
+
+      const session = createSession(db, {
+        userId: user.id,
+        authLevel: 1,
+        idleMs: 5 * 60_000,
+        ip: req.socket.remoteAddress,
+      });
+      setSessionCookie(res, session.id);
+      return sendJson(res, 200, { ok: true, next: '/enroll/totp' });
     }
 
     if (path === '/enroll/options' && req.method === 'POST') {
@@ -288,15 +558,7 @@ export function createPlatformServer({ db, masterKey }) {
       if (user.totp_confirmed_at) return redirect(res, '/');
       const secret = secretFor(user);
       if (!secret) return redirect(res, '/');
-      return sendHtml(
-        res,
-        200,
-        enrollTotpPage({
-          secret,
-          uri: otpauthUri({ account: user.username, secret }),
-          csrf: session.csrf_token,
-        }),
-      );
+      return renderTotpEnrol(res, 200, user, session);
     }
 
     if (path === '/enroll/totp' && req.method === 'POST') {
@@ -309,17 +571,7 @@ export function createPlatformServer({ db, masterKey }) {
 
       const key = `enroll-totp:${user.id}`;
       if (isLocked(db, key)) {
-        const secret = secretFor(user);
-        return sendHtml(
-          res,
-          429,
-          enrollTotpPage({
-            secret,
-            uri: otpauthUri({ account: user.username, secret }),
-            csrf: session.csrf_token,
-            error: 'Too many attempts. Try again later.',
-          }),
-        );
+        return renderTotpEnrol(res, 429, user, session, 'Too many attempts. Try again later.');
       }
 
       const secret = secretFor(user);
@@ -327,16 +579,7 @@ export function createPlatformServer({ db, masterKey }) {
       if (!step) {
         recordFailure(db, key);
         audit(db, { userId: user.id, event: 'totp.enrol', factor: 'totp', result: 'fail' });
-        return sendHtml(
-          res,
-          400,
-          enrollTotpPage({
-            secret,
-            uri: otpauthUri({ account: user.username, secret }),
-            csrf: session.csrf_token,
-            error: 'That code did not match. Try the next one.',
-          }),
-        );
+        return renderTotpEnrol(res, 400, user, session, 'That code did not match. Try the next one.');
       }
       clearFailures(db, key);
       db.prepare('UPDATE users SET totp_last_step = ?, totp_confirmed_at = ? WHERE id = ?').run(
@@ -348,6 +591,7 @@ export function createPlatformServer({ db, masterKey }) {
 
       const elevated = elevateSession(db, session.id);
       setSessionCookie(res, elevated.id);
+      if (authMode === 'password+totp') setRememberCookie(res, issueRememberToken(db, user.id));
 
       if (remainingCodes(db, user.id) === 0) {
         const codes = generateRecoveryCodes(10);
@@ -398,6 +642,7 @@ export function createPlatformServer({ db, masterKey }) {
       audit(db, { userId: session.user_id, event: 'recovery.use', factor: 'recovery', result: 'ok' });
       const elevated = elevateSession(db, session.id);
       setSessionCookie(res, elevated.id);
+      if (authMode === 'password+totp') setRememberCookie(res, issueRememberToken(db, user.id));
       return redirect(res, '/');
     }
 
@@ -432,6 +677,7 @@ export function createPlatformServer({ db, masterKey }) {
       audit(db, { userId: user.id, event: 'login.totp', factor: 'totp', result: 'ok' });
       const elevated = elevateSession(db, session.id);
       setSessionCookie(res, elevated.id);
+      if (authMode === 'password+totp') setRememberCookie(res, issueRememberToken(db, user.id));
       return redirect(res, '/');
     }
 
@@ -454,7 +700,7 @@ export function createPlatformServer({ db, masterKey }) {
       if (!requireL2(session, res)) return undefined;
       const raw = url.searchParams.get('next') || '/';
       const next = /^\/[^\\\s]*$/.test(raw) && !raw.startsWith('//') ? raw : '/';
-      return sendHtml(res, 200, stepUpPage({ next, csrf: session.csrf_token }));
+      return sendHtml(res, 200, stepUpPage({ next, csrf: session.csrf_token, mode: authMode }));
     }
 
     if (path === '/auth/stepup/options' && req.method === 'POST') {
@@ -476,6 +722,31 @@ export function createPlatformServer({ db, masterKey }) {
       setSessionCookie(res, rotated.id);
       audit(db, { userId: user.id, event: 'stepup.ok', factor: 'passkey', result: 'ok' });
       return sendJson(res, 200, { ok: true });
+    }
+
+    if (path === '/auth/stepup/totp' && req.method === 'POST') {
+      if (!requireL2(session, res)) return undefined;
+      const body = await readBody(req);
+      if (!requireCsrf(session, res, body._csrf)) return undefined;
+      const user = userById(db, session.user_id);
+      const rawNext = String(body.next || '/');
+      const next = /^\/[^\\\s]*$/.test(rawNext) && !rawNext.startsWith('//') ? rawNext : '/';
+      const key = `stepup-totp:${user.id}`;
+      if (isLocked(db, key)) {
+        return sendHtml(res, 429, stepUpPage({ next, csrf: session.csrf_token, mode: authMode, error: 'Too many attempts. Try again later.' }));
+      }
+      const secret = secretFor(user);
+      const step = secret ? verifyTotp(secret, body.code, user.totp_last_step) : null;
+      if (!step) {
+        recordFailure(db, key);
+        audit(db, { userId: user.id, event: 'stepup.fail', factor: 'totp', result: 'fail' });
+        return sendHtml(res, 401, stepUpPage({ next, csrf: session.csrf_token, mode: authMode, error: 'That code did not match.' }));
+      }
+      clearFailures(db, key);
+      db.prepare('UPDATE users SET totp_last_step = ? WHERE id = ?').run(step, user.id);
+      markStepUp(db, session.id);
+      audit(db, { userId: user.id, event: 'stepup.ok', factor: 'totp', result: 'ok' });
+      return redirect(res, next);
     }
 
     /* ---------------- console ---------------- */
@@ -746,6 +1017,15 @@ export function createPlatformServer({ db, masterKey }) {
       );
     }
 
+    const rememberedRevoke = path.match(/^\/me\/security\/remembered\/([^/]+)\/revoke$/);
+    if (rememberedRevoke && req.method === 'POST') {
+      const body = await readBody(req);
+      if (!requireCsrf(session, res, body._csrf)) return undefined;
+      revokeRememberToken(db, rememberedRevoke[1], session.user_id);
+      audit(db, { userId: session.user_id, event: 'remember.revoke', result: 'ok' });
+      return redirect(res, '/me/security');
+    }
+
     if (path === '/me/security') {
       const user = userById(db, session.user_id);
       return sendHtml(
@@ -756,6 +1036,7 @@ export function createPlatformServer({ db, masterKey }) {
           creds: db.prepare('SELECT * FROM webauthn_creds WHERE user_id = ? ORDER BY created_at').all(user.id),
           totpConfirmed: Boolean(user.totp_confirmed_at),
           recoveryRemaining: remainingCodes(db, user.id),
+          remembered: listRemembered(db, user.id),
         }),
       );
     }

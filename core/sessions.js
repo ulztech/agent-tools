@@ -1,6 +1,19 @@
 import crypto from 'node:crypto';
 
 export const SESSION_COOKIE = '__Host-at_session';
+
+/**
+ * `__Host-` requires the Secure attribute, which plain-HTTP local development cannot set.
+ * When the configured origin is http, fall back to an unprefixed cookie (still HttpOnly
+ * and SameSite=Strict). A production origin is https, so the hardened name is the default.
+ */
+export function sessionCookieName() {
+  return String(process.env.AT_ORIGIN || '').startsWith('http://') ? 'at_session' : SESSION_COOKIE;
+}
+
+export function sessionCookieSecure() {
+  return !String(process.env.AT_ORIGIN || '').startsWith('http://');
+}
 export const IDLE_MS = 15 * 60 * 1000;
 export const ABSOLUTE_MS = 8 * 60 * 60 * 1000;
 export const STEP_UP_MS = 5 * 60 * 1000;

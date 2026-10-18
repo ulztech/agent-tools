@@ -8,23 +8,32 @@ export const sha256 = (value) => crypto.createHash('sha256').update(String(value
  * Create (or re-invite) a user and return a one-time enrolment token. The token is shown
  * once and stored only as a hash.
  */
-export function issueInvite(db, { username, role, displayName, createdBy = 'cli', ttlMinutes = 60 }) {
-  const name = String(username || '').trim().toLowerCase();
-  if (!name) throw new Error('username is required');
-  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name)) {
-    throw new Error('username must be 1-64 chars: a-z, 0-9, dot, underscore, hyphen');
-  }
-  const existing = db.prepare('SELECT * FROM users WHERE username = ?').get(name);
-  if (existing && existing.status === 'active') throw new Error(`user is already active: ${name}`);
+export function issueInvite(db, { username = null, role, displayName, createdBy = 'cli', ttlMinutes = 60 }) {
+  let userId;
 
-  const userId = existing ? existing.id : newId('usr');
-  if (!existing) {
+  if (username) {
+    const name = String(username).trim().toLowerCase();
+    if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name)) {
+      throw new Error('username must be 1-64 chars: a-z, 0-9, dot, underscore, hyphen');
+    }
+    const existing = db.prepare('SELECT * FROM users WHERE username = ?').get(name);
+    if (existing && existing.status === 'active') throw new Error(`user is already active: ${name}`);
+    userId = existing ? existing.id : newId('usr');
+    if (!existing) {
+      db.prepare(
+        `INSERT INTO users (id, username, display_name, role, status, created_at)
+         VALUES (?,?,?,?, 'invited', ?)`,
+      ).run(userId, name, displayName || username, role, new Date().toISOString());
+    } else {
+      db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role, userId);
+    }
+  } else {
+    // Open invite: the account has no login name until the invitee chooses one.
+    userId = newId('usr');
     db.prepare(
       `INSERT INTO users (id, username, display_name, role, status, created_at)
        VALUES (?,?,?,?, 'invited', ?)`,
-    ).run(userId, name, displayName || username, role, new Date().toISOString());
-  } else {
-    db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role, userId);
+    ).run(userId, `pending_${userId.slice(-10)}`, 'Pending', role, new Date().toISOString());
   }
 
   const token = crypto.randomBytes(32).toString('base64url');
@@ -48,7 +57,7 @@ export function issueInvite(db, { username, role, displayName, createdBy = 'cli'
   audit(db, { userId, event: 'user.invite', result: 'ok', detail: `role=${role}` });
   return {
     userId,
-    username: name,
+    username: username ? String(username).trim().toLowerCase() : null,
     role,
     token,
     expiresInMinutes: ttlMinutes,
@@ -79,7 +88,9 @@ export function consumeInvite(db, token) {
 export function pendingInvites(db) {
   return db
     .prepare(
-      `SELECT i.id, i.expires_at, u.username, u.role
+      `SELECT i.id, i.expires_at,
+              CASE WHEN u.username LIKE 'pending_%' THEN '(chosen at enrolment)' ELSE u.username END AS username,
+              u.role
          FROM invites i JOIN users u ON u.id = i.user_id
         WHERE i.used_at IS NULL AND i.expires_at > ?
         ORDER BY i.expires_at`,
