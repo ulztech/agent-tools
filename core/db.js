@@ -97,6 +97,11 @@ CREATE TABLE IF NOT EXISTS access_rules (
   PRIMARY KEY (role, application_id)
 );
 
+CREATE TABLE IF NOT EXISTS platform_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS recovery_codes (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

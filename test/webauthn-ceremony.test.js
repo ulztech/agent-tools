@@ -115,4 +115,9 @@ test('webauthn: an unknown username gets a decoy, not an empty allow list', asyn
   assert.equal(known.options.allowCredentials.length, 1);
   assert.equal(unknown.options.allowCredentials.length, 1);
   assert.notEqual(known.options.allowCredentials[0].id, unknown.options.allowCredentials[0].id);
+
+  // A real credential id is stable across calls; the decoy must be too, or the rotation
+  // becomes the oracle.
+  const again = await beginAuthentication(db, 'nobody-here');
+  assert.equal(unknown.options.allowCredentials[0].id, again.options.allowCredentials[0].id);
 });

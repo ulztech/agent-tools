@@ -128,6 +128,23 @@ export async function finishRegistration(db, user, response) {
 /* Authentication                                                      */
 /* ------------------------------------------------------------------ */
 
+/**
+ * A stable, secret-derived decoy for accounts that have no credential. Regenerating it per
+ * request would itself be an oracle: a real credential id is stable across calls.
+ */
+function decoyCredential(db, username) {
+  let key = db.prepare("SELECT value FROM platform_meta WHERE key = 'decoy_key'").get()?.value;
+  if (!key) {
+    key = crypto.randomBytes(32).toString('base64url');
+    db.prepare("INSERT OR IGNORE INTO platform_meta (key, value) VALUES ('decoy_key', ?)").run(key);
+  }
+  const id = crypto
+    .createHmac('sha256', Buffer.from(key, 'base64url'))
+    .update(String(username || '').toLowerCase())
+    .digest('base64url');
+  return { id, type: 'public-key', transports: ['internal'] };
+}
+
 export async function beginAuthentication(db, username) {
   const { rpID } = rpConfig();
   const user = findUser(db, username);
@@ -140,7 +157,7 @@ export async function beginAuthentication(db, username) {
   const allowCredentials =
     creds.length > 0
       ? creds.map((c) => ({ id: c.credential_id, transports: JSON.parse(c.transports || '[]') }))
-      : [{ id: crypto.randomBytes(32).toString('base64url'), type: 'public-key', transports: ['internal'] }];
+      : [decoyCredential(db, username)];
 
   const options = await generateAuthenticationOptions({
     rpID,
