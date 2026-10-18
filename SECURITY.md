@@ -40,4 +40,4 @@ vulnerabilities under this policy:
 ## Handling
 
 Fixture data in this repository is synthetic. No real employee, payroll, or client
-data may be committed — including in test output, screenshots, or CI artefacts.
+data may be committed — including in test output, screenshots, or test artefacts.

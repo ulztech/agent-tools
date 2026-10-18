@@ -67,9 +67,8 @@ npm test           # unit + capability + audit + gate + masking + adversarial su
 npm run verify     # build && test
 ```
 
-Local state lives in `.data/` and is git-ignored. The master key and the signing key
-are generated on first use; production installs must supply the master key from the
-host keystore (see `docs/RUNBOOK` in the platform plan).
+**Verification is local.** There is no hosted CI — `npm run verify` is the gate. Run it
+before every commit; it is the same command the pipeline's tester gate runs.
 
 ### CLI
 
