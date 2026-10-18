@@ -1,0 +1,23 @@
+{
+  "name": "agent-tools",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "description": "Agent-facing gateways behind one control plane: single login, one credential vault, one audit trail. Feature 1: database gateway with automated PII masking.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "bin": {
+    "agent-tools": "./src/cli.js"
+  },
+  "scripts": {
+    "build": "node scripts/build-check.js",
+    "test": "node --disable-warning=ExperimentalWarning --experimental-sqlite --test test/capability.test.js test/audit.test.js test/sqlgate.test.js test/masking.test.js test/query.test.js test/adversarial.test.js",
+    "test:integration": "node --disable-warning=ExperimentalWarning --experimental-sqlite --test test/integration.mysql.test.js",
+    "verify": "npm run build && npm test"
+  },
+  "optionalDependencies": {
+    "mysql2": "^3.11.0"
+  }
+}

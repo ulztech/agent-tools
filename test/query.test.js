@@ -1,0 +1,140 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { runQuery } from '../src/query.js';
+import { buildRedactionPlan } from '../src/masking.js';
+import { verifyAudit } from '../src/store.js';
+import { CONNECTION, DEFAULT_REGISTRY, PII, mint, setup, smartStub } from './helpers.js';
+
+function run(s, { sql, token, connectionName = CONNECTION, driverFactory, maxRows }) {
+  return runQuery({
+    db: s.db,
+    masterKey: s.masterKey,
+    publicKey: s.signing.publicKey,
+    kid: s.signing.kid,
+    connectionName,
+    token,
+    sql,
+    maxRows,
+    driverFactory: driverFactory || (() => smartStub(sql)),
+  });
+}
+
+test('query: an authorised read returns masked rows and audits the grant', async () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const { token } = mint(s.signing);
+  const result = await run(s, { sql: 'select employee_id, email from employee', token });
+
+  assert.equal(result.rows[0].email, '[REDACTED]');
+  assert.equal(result.rows[0].employee_id, 'emp-1');
+  assert.deepEqual(result.annotations.pii.maskedColumns, ['email']);
+
+  const audit = s.db.prepare('SELECT * FROM audit_events ORDER BY seq DESC LIMIT 1').get();
+  assert.equal(audit.decision, 'allow');
+  assert.equal(audit.row_count, 1);
+  assert.equal(verifyAudit(s.db).ok, true);
+});
+
+test('query: a write is refused by the gate, audited, and never reaches the driver', async () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const { token } = mint(s.signing);
+  let driverCalls = 0;
+  await assert.rejects(
+    () =>
+      run(s, {
+        sql: 'update employee set email = null',
+        token,
+        driverFactory: () => {
+          driverCalls += 1;
+          return smartStub('select 1');
+        },
+      }),
+    /E_SQL_NOT_READ_ONLY/,
+  );
+  assert.equal(driverCalls, 0);
+  const audit = s.db.prepare('SELECT * FROM audit_events ORDER BY seq DESC LIMIT 1').get();
+  assert.equal(audit.decision, 'deny:E_SQL_NOT_READ_ONLY');
+});
+
+test('query: an unknown connection is refused after the capability check', async () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const { token } = mint(s.signing, { claims: { resource: 'db:missing' } });
+  await assert.rejects(() => run(s, { sql: 'select 1 from employee', token, connectionName: 'missing' }), /E_UNKNOWN_CONNECTION/);
+  const audit = s.db.prepare('SELECT * FROM audit_events ORDER BY seq DESC LIMIT 1').get();
+  assert.equal(audit.decision, 'deny:unknown-connection');
+});
+
+test('query: an inactive connection is refused', async () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  s.db.prepare("UPDATE connections SET status = 'disabled' WHERE name = ?").run(CONNECTION);
+  const { token } = mint(s.signing);
+  await assert.rejects(() => run(s, { sql: 'select 1 from employee', token }), /E_CONNECTION_INACTIVE/);
+});
+
+test('query: a driver failure is audited as an error', async () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const { token } = mint(s.signing);
+  await assert.rejects(
+    () =>
+      run(s, {
+        sql: 'select email from employee',
+        token,
+        driverFactory: () => ({
+          query: async () => {
+            throw new Error('boom');
+          },
+          close: async () => {},
+        }),
+      }),
+    /E_DRIVER/,
+  );
+  const audit = s.db.prepare('SELECT * FROM audit_events ORDER BY seq DESC LIMIT 1').get();
+  assert.equal(audit.decision, 'error:driver');
+});
+
+test('query: max rows is honoured', async () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const { token } = mint(s.signing);
+  const result = await run(s, {
+    sql: 'select email from employee',
+    token,
+    maxRows: 2,
+    driverFactory: () => smartStub('select email from employee', { rows: 5 }),
+  });
+  assert.equal(result.rows.length, 2);
+});
+
+test('query: the signed plan is a floor — deleting a rule after mint still masks', async () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const { token } = mint(s.signing, { plan: buildRedactionPlan(s.db, s.connId) });
+  s.db.prepare('DELETE FROM pii_registry').run();
+
+  const result = await run(s, { sql: 'select email from employee', token });
+  assert.equal(result.rows[0].email, '[REDACTED]');
+});
+
+test('query: the chain stays valid across grants, denials and errors', async () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+
+  const a = mint(s.signing);
+  await run(s, { sql: 'select email from employee', token: a.token });
+
+  const b = mint(s.signing);
+  await assert.rejects(() => run(s, { sql: 'drop table employee', token: b.token }));
+
+  const c = mint(s.signing);
+  await assert.rejects(() => run(s, { sql: 'select 1', token: c.token, connectionName: 'nope' }));
+
+  const check = verifyAudit(s.db);
+  assert.equal(check.ok, true);
+  assert.equal(check.checked, 3);
+});
+
+test('query: no PII value is present anywhere in the audit trail', async () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const { token } = mint(s.signing);
+  await run(s, { sql: "select email from employee where email = 'juan.dela.cruz@example.com'", token });
+
+  const raw = JSON.stringify(s.db.prepare('SELECT * FROM audit_events').all());
+  assert.equal(raw.includes(PII.email), false);
+  assert.equal(raw.includes('@example.com'), false);
+});
