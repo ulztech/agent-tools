@@ -172,9 +172,51 @@
       "status": "pass",
       "ts": "2026-10-18T20:42:00Z",
       "note": "169/169 tests (25 new identity cases: nav filtering, session expiry/revocation/elevation, RFC 6238 vectors, TOTP replay, secretbox AAD, L1 gating, role 403s, forward-auth, headers); build ok on 31 modules; smoke: init issues invite, /login renders, anon redirect, no password field"
+    },
+    {
+      "gate": "implementation",
+      "agent": "orchestrator",
+      "status": "pass",
+      "ts": "2026-10-18T21:30:00Z",
+      "note": "C1+C2: user detail, invites, session revoke, CSRF + Origin, recovery codes, step-up with id rotation, throttling, passkey removal, hash-chained auth events, max 3 sessions"
+    },
+    {
+      "gate": "review_gate",
+      "agent": "reviewer.agent",
+      "status": "fail",
+      "ts": "2026-10-18T21:45:00Z",
+      "note": "NO-GO: /enroll/totp re-rendered the seed at L1 (critical); auth_events claimed chained but was not; session/invite revoke lacked step-up; open redirect"
+    },
+    {
+      "gate": "security_gate",
+      "agent": "security-gate.agent",
+      "status": "fail",
+      "ts": "2026-10-18T21:45:00Z",
+      "note": "FAIL: same critical; raw session id forwarded to upstreams; username-keyed lockout DoS; no CSRF on enrol TOTP"
+    },
+    {
+      "gate": "review_gate",
+      "agent": "reviewer.agent",
+      "status": "pass",
+      "ts": "2026-10-19T00:20:00Z",
+      "note": "GO after remediation; flagged L1 idle not 5 min and next=/\\ redirect, both fixed"
+    },
+    {
+      "gate": "security_gate",
+      "agent": "security-gate.agent",
+      "status": "pass",
+      "ts": "2026-10-19T00:20:00Z",
+      "note": "PASS-WITH-NOTES: critical closed; chain unkeyed (documented), master key fallback (documented)"
+    },
+    {
+      "gate": "verifier_gate",
+      "agent": "verifier.agent",
+      "status": "pass",
+      "ts": "2026-10-19T01:10:00Z",
+      "note": "PASS WITH CONDITIONS then PASS: 207/207; enumeration oracle closed via stable shape-matched decoy; real WebAuthn ceremony suite; 4 review rounds total. Residual: hardware authenticator/browser/Docker/second host unverified"
     }
   ],
   "handoff_token": "pagenttools-tok-0005",
   "created_at": "2026-10-18T13:14:00Z",
-  "updated_at": "2026-10-18T20:42:00Z"
+  "updated_at": "2026-10-19T01:10:00Z"
 }

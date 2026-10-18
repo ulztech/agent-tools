@@ -35,6 +35,12 @@ vulnerabilities under this policy:
   the external WORM anchor planned for a later phase.
 - **Schema disclosure.** `SHOW CREATE TABLE` / `DESCRIBE` are permitted, so table DDL is
   visible to an agent. Schema is intentionally exposed as an MCP resource.
+- **Credential-shape metadata.** `/auth/options` returns a decoy credential whose length
+  and transports match the modal values of the installed passkeys, so an unauthenticated
+  caller can infer the fleet's typical authenticator shape (~1 bit). Account existence is
+  not revealed: decoys are stable per username and indistinguishable in status, body,
+  headers and timing. Accepted for an internal console; pin the shape at init if it ever
+  matters.
 - **Unmapped databases.** Only MySQL/MariaDB is supported in v1.
 
 ## Handling
