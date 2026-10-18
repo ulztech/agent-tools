@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -28,8 +29,20 @@ export function readInventory(dir = gatewayDataDir()) {
   if (!fs.existsSync(file)) return { ...empty, reason: 'gateway store not found' };
 
   let db;
+  let snapshot = null;
   try {
-    db = new DatabaseSync(file, { readOnly: true });
+    try {
+      db = new DatabaseSync(file, { readOnly: true });
+    } catch {
+      // A WAL database cannot be opened read-only from a read-only mount (SQLite needs
+      // the -shm). Work on a snapshot instead of failing the page.
+      snapshot = path.join(os.tmpdir(), `at-inventory-${process.pid}-${Date.now()}.sqlite`);
+      fs.copyFileSync(file, snapshot);
+      for (const suffix of ['-wal', '-shm']) {
+        if (fs.existsSync(`${file}${suffix}`)) fs.copyFileSync(`${file}${suffix}`, `${snapshot}${suffix}`);
+      }
+      db = new DatabaseSync(snapshot);
+    }
     db.exec('PRAGMA busy_timeout = 500;');
     return {
       available: true,
@@ -59,6 +72,15 @@ export function readInventory(dir = gatewayDataDir()) {
     return { ...empty, reason: err.message };
   } finally {
     if (db) db.close();
+    if (snapshot) {
+      for (const suffix of ['', '-wal', '-shm']) {
+        try {
+          fs.unlinkSync(`${snapshot}${suffix}`);
+        } catch {
+          /* best effort */
+        }
+      }
+    }
   }
 }
 

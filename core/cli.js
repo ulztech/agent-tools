@@ -48,7 +48,12 @@ async function main() {
     }
     loadMasterKey(dir);
     const username = values.username || 'owner';
-    const invite = issueInvite(db, { username, role: 'owner', displayName: values['display-name'] });
+    const invite = issueInvite(db, {
+      username,
+      role: 'owner',
+      displayName: values['display-name'],
+      ttlMinutes: 15,
+    });
     const port = Number(values.port || 8443);
     out({
       ok: true,
@@ -119,7 +124,7 @@ async function main() {
       ok: true,
       console: `http://${host}:${port}`,
       authz: `http://${authzHost}:${authzPort}/authz`,
-      note: 'console is loopback only. Reach it through WireGuard or an SSH tunnel (D23).',
+      note: 'console binds 0.0.0.0 inside its container network; compose publishes it to 127.0.0.1 only. Reach it through WireGuard.',
     });
     return undefined;
   }

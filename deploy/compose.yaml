@@ -6,7 +6,8 @@ name: agent-tools
 #   app-net     human-facing applications (durable-pi). internal:true.
 #   edge-net    the only network with a route to the outside.
 #
-# The console is published to 127.0.0.1 only. Reach it through WireGuard.
+# The console is served by Caddy on 127.0.0.1:8443 and reached through WireGuard.
+# The platform container itself publishes nothing.
 
 services:
   platform:
@@ -21,10 +22,11 @@ services:
       AT_GATEWAY_DATA: /gateway
     volumes:
       - platform-data:/data
-      # Read-only view of the gateway's store and signing key.
-      - ${GATEWAY_DATA:-../.data}:/gateway:ro
-    ports:
-      - "127.0.0.1:${CONSOLE_PORT:-8443}:8443"
+      # ONLY these two files. The same directory holds the gateway master key, the
+      # capability signing private key and service-passkey key files; mounting the
+      # directory would hand all of them to the console.
+      - ${GATEWAY_DATA:-../.data}/gateway.sqlite:/gateway/gateway.sqlite:ro
+      - ${GATEWAY_DATA:-../.data}/signing.pub.pem:/gateway/signing.pub.pem:ro
     networks:
       - cp-net
       - authz-net
@@ -41,14 +43,18 @@ services:
     restart: unless-stopped
     ports:
       - "${APP_HTTPS_PORT:-443}:443"
+      # The console's WebAuthn origin is https on 8443. Published to loopback only.
+      - "127.0.0.1:${CONSOLE_PORT:-8443}:8443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
     networks:
-      - edge-net
+      # cp-net is required to serve the console; that is the only reason Caddy is on it.
+      - cp-net
       - authz-net
       - app-net
+      - edge-net
     depends_on:
       - platform
 

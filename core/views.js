@@ -363,7 +363,7 @@ ${table(
     `<code>${esc(s.kid)}</code>`,
     `<code>${esc(s.envelope)}</code>`,
     esc(s.expires_at),
-    s.revoked_at ? '<span class="tag">revoked</span>' : String(s.minted_today),
+    s.revoked_at ? '<span class="tag">revoked</span>' : esc(s.minted_today),
   ]),
 )}`,
   });

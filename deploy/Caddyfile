@@ -1,29 +1,40 @@
-{
-	# Internal only: no public DNS, no public certificate.
-	auto_https off
-}
-
 # Applications live on the console's host, under /apps/<name>.
 #
 # Why not a subdomain: `__Host-at_session` is host-bound, so a cookie set for
 # console.agent-tools.internal is never sent to durable.agent-tools.internal and
-# forward_auth would always 401. Keeping the same host (different port is irrelevant to
-# cookies) makes forward_auth work without a Domain cookie that every subdomain could read.
+# forward_auth would always 401. The same host (a different port is irrelevant to
+# cookies) makes forward_auth work without a Domain cookie every subdomain could read.
+#
+# `tls internal` uses Caddy's local CA and never contacts ACME, so no public DNS or
+# certificate is involved.
+
+# The console's WebAuthn origin. WebAuthn requires a secure context, so the console must
+# be served over TLS even on loopback.
+https://console.agent-tools.internal:8443 {
+	tls internal
+	reverse_proxy platform:8443
+}
+
+# Human-facing applications.
 https://console.agent-tools.internal {
 	tls internal
 
 	handle_path /apps/durable-pi/* {
-		# Strip client-supplied identity BEFORE forward_auth adds its own.
-		request_header -X-AT-User
-		request_header -X-AT-Username
-		request_header -X-AT-Roles
+		# `route` forces execution order. Caddy's default order runs `request_header`
+		# AFTER `forward_auth`, which would delete the identity headers the auth step just
+		# copied in. Inside `route` the order is exactly as written.
+		route {
+			request_header -X-AT-User
+			request_header -X-AT-Username
+			request_header -X-AT-Roles
 
-		forward_auth platform:8444 {
-			uri /authz?app=durable-pi
-			copy_headers X-AT-User X-AT-Username X-AT-Roles
+			forward_auth platform:8444 {
+				uri /authz?app=durable-pi
+				copy_headers X-AT-User X-AT-Username X-AT-Roles
+			}
+
+			reverse_proxy durable-pi:4781
 		}
-
-		reverse_proxy durable-pi:4781
 	}
 
 	respond "Not found" 404

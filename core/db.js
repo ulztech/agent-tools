@@ -130,6 +130,7 @@ export function dataDir() {
 }
 
 export function openPlatformDb(dir = dataDir()) {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const db = new DatabaseSync(path.join(dir, 'platform.sqlite'));
   db.exec('PRAGMA journal_mode = WAL;');
   db.exec('PRAGMA foreign_keys = ON;');
