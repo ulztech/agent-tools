@@ -6,6 +6,7 @@ import { dataDir, openPlatformDb } from './db.js';
 import { issueInvite } from './invites.js';
 import { loadMasterKey } from './secretbox.js';
 import { createPlatformServer } from './server.js';
+import { createAuthzServer } from './authz.js';
 
 const OPTIONS = {
   data: { type: 'string' },
@@ -104,10 +105,19 @@ async function main() {
     const host = values.host || '127.0.0.1';
     const server = createPlatformServer({ db, masterKey });
     await new Promise((resolve) => server.listen(port, host, resolve));
+
+    // The forward-auth endpoint gets its own listener so a proxy on the application
+    // network can reach /authz and nothing else.
+    const authzPort = Number(values['authz-port'] || process.env.AT_AUTHZ_PORT || 8444);
+    const authzHost = values['authz-host'] || process.env.AT_AUTHZ_HOST || '0.0.0.0';
+    const authz = createAuthzServer({ db });
+    await new Promise((resolve) => authz.listen(authzPort, authzHost, resolve));
+
     out({
       ok: true,
-      listening: `http://${host}:${port}`,
-      note: 'loopback only. Reach it through WireGuard or an SSH tunnel (D23).',
+      console: `http://${host}:${port}`,
+      authz: `http://${authzHost}:${authzPort}/authz`,
+      note: 'console is loopback only. Reach it through WireGuard or an SSH tunnel (D23).',
     });
     return undefined;
   }

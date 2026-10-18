@@ -2,8 +2,25 @@ import crypto from 'node:crypto';
 
 export const GENESIS = '0'.repeat(64);
 
+let chainKey = null;
+
+/**
+ * Key the chain with a secret derived from the host master key. Without this the chain is
+ * only self-consistent: anyone who can write the database can recompute it. With it, a
+ * forger also needs the key.
+ */
+export function configureChainKey(key) {
+  chainKey = key ? Buffer.from(key) : null;
+}
+
 export function sha256Hex(input) {
   return crypto.createHash('sha256').update(String(input)).digest('hex');
+}
+
+function mac(input) {
+  return chainKey
+    ? crypto.createHmac('sha256', chainKey).update(input).digest('hex')
+    : sha256Hex(input);
 }
 
 export function canonicalJson(value) {
@@ -30,7 +47,7 @@ export function appendEvent(db, event) {
   };
   const prev =
     db.prepare('SELECT row_hash FROM auth_events ORDER BY seq DESC LIMIT 1').get()?.row_hash || GENESIS;
-  const rowHash = sha256Hex(`${prev}${canonicalJson(payload)}`);
+  const rowHash = mac(`${prev}${canonicalJson(payload)}`);
   db.prepare(
     `INSERT INTO auth_events (ts, user_id, event, factor, result, ip, detail, prev_hash, row_hash)
      VALUES (?,?,?,?,?,?,?,?,?)`,
@@ -53,7 +70,7 @@ export function verifyChain(db) {
   let prev = GENESIS;
   for (const row of rows) {
     if (row.prev_hash !== prev) return { ok: false, brokenAt: row.seq, checked: rows.length };
-    const expected = sha256Hex(
+    const expected = mac(
       `${prev}${canonicalJson({
         ts: row.ts,
         user_id: row.user_id,

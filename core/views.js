@@ -327,44 +327,63 @@ ${table(
   });
 }
 
-export function toolsPage({ user }) {
+export function toolsPage({ user, inventory }) {
+  const banner = inventory.available
+    ? `<p class="muted">Read-only view of <code>${esc(inventory.dir)}</code> · ${inventory.auditEvents} gateway audit events</p>`
+    : `<div class="card"><p style="margin:0">Gateway store not readable: ${esc(inventory.reason)}. Set <code>AT_GATEWAY_DATA</code> to the gateway data directory.</p></div>`;
+
   return shell({
     title: 'Tools',
     user,
     active: 'tools',
     body: `<h1>Tools</h1><p class="lede">What an agent can reach.</p>
+${banner}
+<h2>Tools</h2>
 ${table(
-  ['Tool', 'Profile', 'Agents reach it', 'Status'],
-  [
-    [
-      '<strong>database-gateway</strong>',
-      '<span class="tag">network</span>',
-      'with a service passkey',
-      '<span class="tag">active</span>',
-    ],
-  ],
+  ['Tool', 'Profile'],
+  inventory.tools.map((t) => [`<strong>${esc(t.name)}</strong>`, `<span class="tag">${esc(t.profile)}</span>`]),
+)}
+<h2>Connections</h2>
+${table(
+  ['Name', 'Engine', 'Host', 'Database', 'Status'],
+  inventory.connections.map((c) => [
+    `<strong>${esc(c.name)}</strong>`,
+    esc(c.engine),
+    `<code>${esc(c.host)}:${esc(c.port)}</code>`,
+    esc(c.database_name),
+    `<span class="tag">${esc(c.status)}</span>`,
+  ]),
 )}
 <h2>Service passkeys</h2>
-<div class="card"><p class="muted" style="margin:0">Issued per connection by the gateway CLI (<code>svc enroll</code>). The console lists and revokes them in C3, once the gateway store is owned by the platform.</p></div>
-<h2>Connections</h2>
-<div class="card"><p class="muted" style="margin:0">Database connections are held by the gateway vault today. Moving the inventory here is C3 work.</p></div>`,
+${table(
+  ['Connection', 'Label', 'kid', 'Envelope', 'Expires', 'Minted today'],
+  inventory.credentials.map((s) => [
+    esc(s.connection),
+    esc(s.label),
+    `<code>${esc(s.kid)}</code>`,
+    `<code>${esc(s.envelope)}</code>`,
+    esc(s.expires_at),
+    s.revoked_at ? '<span class="tag">revoked</span>' : String(s.minted_today),
+  ]),
+)}`,
   });
 }
 
-export function applicationsPage({ user, apps }) {
+export function applicationsPage({ user, apps, health = {} }) {
   return shell({
     title: 'Applications',
     user,
     active: 'applications',
     body: `<h1>Applications</h1><p class="lede">What a person can sign into. Access is role → application, never a per-app user list.</p>
 ${table(
-  ['Application', 'Upstream', 'Auth mode', 'Allowed roles', 'Status'],
+  ['Application', 'Upstream', 'Auth mode', 'Allowed roles', 'Status', 'Health'],
   apps.map((a) => [
     `<strong>${esc(a.name)}</strong>`,
     `<code>${esc(a.upstream_url)}</code>`,
     esc(a.auth_mode),
     esc(JSON.parse(a.allowed_roles).join(', ')),
     `<span class="tag">${esc(a.status)}</span>`,
+    `<span class="tag">${esc(health[a.name] || 'unknown')}</span>`,
   ]),
 )}
 <h2>Signing users in</h2>
@@ -372,19 +391,30 @@ ${table(
   });
 }
 
-export function policyPage({ user }) {
+export function policyPage({ user, inventory }) {
   return shell({
     title: 'Policy',
     user,
     active: 'policy',
     body: `<h1>Policy</h1><p class="lede">What gets masked, and who may use what.</p>
-<div class="card"><p class="muted" style="margin:0">The masking registry and capability envelopes are edited on the gateway until C3. The console renders them read-only here.</p></div>
+<div class="card"><p style="margin:0">Read-only here. The registry is edited on the gateway until the platform owns the store.</p></div>
+<h2>Masking registry</h2>
 ${table(
-  ['Section', 'State'],
+  ['Connection', 'Table', 'Column', 'Strategy', 'State'],
+  inventory.registry.map((r) => [
+    esc(r.connection),
+    esc(r.table_name),
+    `<code>${esc(r.column_name)}</code>`,
+    `<span class="tag">${esc(r.strategy)}</span>`,
+    r.enabled ? 'enforced' : 'disabled',
+  ]),
+)}
+<h2>Access rules</h2>
+${table(
+  ['Rule', 'State'],
   [
-    ['Masking registry', 'owned by the gateway (C3)'],
-    ['Capability envelopes', 'reads-only · 900 s · daily quota'],
-    ['Access rules', 'role → application'],
+    ['Capability envelopes', 'reads-only · ≤900 s · daily quota'],
+    ['Role → application', 'editable under Applications'],
     ['Trifecta', 'private-read blocks external-send'],
   ],
 )}`,
@@ -410,7 +440,7 @@ ${table(
   });
 }
 
-export function settingsPage({ user, rp }) {
+export function settingsPage({ user, rp, signing, inventory }) {
   return shell({
     title: 'Settings',
     user,
@@ -423,11 +453,31 @@ ${table(
     ['RP ID', `<code>${esc(rp.rpID)}</code>`],
     ['Origin', `<code>${esc(rp.origin)}</code>`],
     ['User verification', 'required'],
-    ['Algorithms', 'ES256 / RS256 (library-pinned)'],
+    ['Algorithm', 'ES256 (pinned by the library)'],
   ],
 )}
-<h2>Signing keys</h2>
-<div class="card"><p class="muted" style="margin:0">Capability signing keys and JWKS rotation land with the control plane in C3.</p></div>`,
+<h2>Capability signing key</h2>
+${
+      signing.present
+        ? `${table(
+            ['Setting', 'Value'],
+            [
+              ['kid', `<code>${esc(signing.kid)}</code>`],
+              ['alg', esc(signing.alg)],
+              ['custody', 'gateway host keystore'],
+            ],
+          )}
+<pre style="background:#fff;border:1px solid var(--line);border-radius:8px;padding:12px;overflow:auto;font-size:11.5px">${esc(JSON.stringify(signing.jwks, null, 2))}</pre>`
+        : `<div class="card"><p style="margin:0">No signing key found in the gateway store${signing.reason ? `: ${esc(signing.reason)}` : ''}.</p></div>`
+    }
+<h2>Gateway store</h2>
+<div class="card"><p style="margin:0">${
+      inventory.available
+        ? `<span class="tag">connected</span> <code>${esc(inventory.dir)}</code> · ${inventory.connections.length} connections · ${inventory.registry.length} registry rules`
+        : `<span class="tag">not found</span> ${esc(inventory.reason)}`
+    }</p></div>
+<h2>Backups and drills</h2>
+<div class="card"><p class="muted" style="margin:0">Rotation, restore and break-glass drills are run from the runbook; results are recorded in the audit log.</p></div>`,
   });
 }
 
@@ -454,9 +504,36 @@ ${table(
       totpConfirmed
         ? '<span class="tag">enrolled</span> A 6-digit code is required at every sign-in.'
         : '<span class="tag">not enrolled</span>'
-    }</p></div>
+    }</p>
+<form method="post" action="/me/security/totp/rotate" style="margin-top:10px">
+<input type="hidden" name="_csrf" value="${esc(user.csrf_token)}">
+<button class="ghost" type="submit">Set up a new authenticator</button>
+</form></div>
+
 <h2>Recovery codes</h2>
-<div class="card"><p style="margin:0"><strong>${recoveryRemaining}</strong> unused. A code replaces the authenticator factor once — never the passkey.</p></div>`,
+<div class="card"><p style="margin:0"><strong>${recoveryRemaining}</strong> unused. A code replaces the authenticator factor once — never the passkey.</p>
+<form method="post" action="/me/security/recovery/regenerate" style="margin-top:10px">
+<input type="hidden" name="_csrf" value="${esc(user.csrf_token)}">
+<button class="ghost" type="submit">Regenerate codes</button>
+</form></div>`,
+  });
+}
+
+export function meActivityPage({ user, events }) {
+  return shell({
+    title: 'My activity',
+    user,
+    active: 'me',
+    body: `<h1>My activity</h1><p class="lede">Your own authentication events.</p>
+${table(
+  ['When', 'Event', 'Factor', 'Result'],
+  events.map((e) => [
+    esc(e.ts),
+    `<code>${esc(e.event)}</code>`,
+    esc(e.factor || '—'),
+    esc(e.result),
+  ]),
+)}`,
   });
 }
 

@@ -1,0 +1,85 @@
+name: agent-tools
+
+# Two trust zones on one host (D23):
+#   cp-net      control plane. internal:true = no gateway, no egress.
+#   authz-net   one endpoint only: /authz for the application proxy.
+#   app-net     human-facing applications (durable-pi). internal:true.
+#   edge-net    the only network with a route to the outside.
+#
+# The console is published to 127.0.0.1 only. Reach it through WireGuard.
+
+services:
+  platform:
+    build: ..
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      AT_MASTER_KEY: ${AT_MASTER_KEY:?set AT_MASTER_KEY in .env}
+      AT_RP_ID: ${AT_RP_ID:-console.agent-tools.internal}
+      AT_ORIGIN: ${AT_ORIGIN:-https://console.agent-tools.internal:8443}
+      AT_DATA: /data
+      AT_GATEWAY_DATA: /gateway
+    volumes:
+      - platform-data:/data
+      # Read-only view of the gateway's store and signing key.
+      - ${GATEWAY_DATA:-../.data}:/gateway:ro
+    ports:
+      - "127.0.0.1:${CONSOLE_PORT:-8443}:8443"
+    networks:
+      - cp-net
+      - authz-net
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "${APP_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - edge-net
+      - authz-net
+      - app-net
+    depends_on:
+      - platform
+
+  durable-pi:
+    image: ${DURABLE_PI_IMAGE:-ghcr.io/disler/durable-pi:latest}
+    restart: unless-stopped
+    profiles: ["apps"]
+    # No ports: the only way in is through Caddy, which enforces forward-auth.
+    expose:
+      - "4781"
+    networks:
+      - app-net
+
+networks:
+  cp-net:
+    internal: true
+    driver_opts:
+      com.docker.network.bridge.name: br-at-cp
+  authz-net:
+    internal: true
+    driver_opts:
+      com.docker.network.bridge.name: br-at-authz
+  app-net:
+    internal: true
+    driver_opts:
+      com.docker.network.bridge.name: br-at-app
+  edge-net:
+    driver_opts:
+      com.docker.network.bridge.name: br-at-edge
+
+volumes:
+  platform-data:
+  caddy-data:
+  caddy-config:

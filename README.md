@@ -120,6 +120,30 @@ verification result. The chain is **unkeyed**: it catches edits, deletions in th
 and reordering, but someone who can write to the database can recompute the whole chain.
 Keyed signing plus an external anchor land in C3.
 
+## Deployment (C3)
+
+`deploy/` holds the two-zone topology from the auth plan.
+
+| Network | Purpose | Reachable from agents |
+|---|---|---|
+| `cp-net` | idp, sessions, console | **no** — `internal: true`, no gateway |
+| `authz-net` | a single endpoint, `/authz` | **no** |
+| `app-net` | durable-pi | only through Caddy |
+| `edge-net` | the application proxy | — |
+
+```bash
+cd deploy
+cp .env.example .env          # fill in AT_MASTER_KEY
+docker compose --profile apps up -d --build
+docker compose port platform  # 127.0.0.1:8443 — loopback only
+```
+
+The forward-auth decision runs on its **own listener** (`:8444`), so a proxy on the
+application network can call `/authz` and nothing else. Caddy strips inbound `X-AT-*`
+headers before adding its own, and durable-pi publishes no port.
+
+Run the five isolation checks in `deploy/RUNBOOK.md` **before** enrolling anyone.
+
 ## Layout
 
 ```
@@ -149,8 +173,9 @@ test/           gateway, capability, masking, adversarial, identity
 Phase A + B of the platform plan, plus A2 (service passkeys) and C1+C2 of the identity
 layer: passkey registration and assertion, TOTP, recovery codes, step-up, invites,
 session management, role-based console, forward-auth for applications, and a
-hash-chained auth log. Later phases: network isolation (C3), gateway inventory inside
-the console, MCP transport, and signing-key rotation.
+hash-chained auth log, gateway inventory in the console, and the C3 deployment topology.
+Later: MCP transport over HTTP, signing-key rotation with JWKS overlap, and an external
+anchor for the audit chain.
 
 ## License
 

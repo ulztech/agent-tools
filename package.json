@@ -13,7 +13,7 @@
   },
   "scripts": {
     "build": "node scripts/build-check.js",
-    "test": "node --disable-warning=ExperimentalWarning --experimental-sqlite --test test/identity.test.js test/webauthn-ceremony.test.js test/platform.test.js test/cli-seal.test.js test/capability.test.js test/service-passkey.test.js test/audit.test.js test/sqlgate.test.js test/masking.test.js test/query.test.js test/adversarial.test.js",
+    "test": "node --disable-warning=ExperimentalWarning --experimental-sqlite --test test/identity.test.js test/webauthn-ceremony.test.js test/platform.test.js test/platform-c3.test.js test/cli-seal.test.js test/capability.test.js test/service-passkey.test.js test/audit.test.js test/sqlgate.test.js test/masking.test.js test/query.test.js test/adversarial.test.js",
     "platform": "node --disable-warning=ExperimentalWarning --experimental-sqlite core/cli.js serve",
     "platform:init": "node --disable-warning=ExperimentalWarning --experimental-sqlite core/cli.js init",
     "platform:users": "node --disable-warning=ExperimentalWarning --experimental-sqlite core/cli.js users",

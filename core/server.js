@@ -29,7 +29,9 @@ import { open as openSealed, seal } from './secretbox.js';
 import { consumeCode, generateRecoveryCodes, remainingCodes, storeCodes } from './recovery.js';
 import { clearFailures, isLocked, recordFailure } from './throttle.js';
 import { issueInvite, consumeInvite, inviteByToken, pendingInvites } from './invites.js';
-import { verifyChain } from './chain.js';
+import { verifyChain, configureChainKey } from './chain.js';
+import { probeUpstream, readInventory, readSigningKey } from './inventory.js';
+import { authzDecision } from './authz.js';
 import {
   applicationsPage,
   auditPage,
@@ -38,6 +40,7 @@ import {
   errorPage,
   inviteCreatedPage,
   loginPage,
+  meActivityPage,
   meSecurityPage,
   overviewPage,
   peoplePage,
@@ -111,6 +114,12 @@ function sameToken(a, b) {
 export function createPlatformServer({ db, masterKey }) {
   const rp = rpConfig();
   seedDurablePi(db);
+
+  // Key the audit chain from the host master key: a forger now needs the key, not just
+  // write access to the database.
+  configureChainKey(
+    Buffer.from(crypto.hkdfSync('sha256', masterKey, Buffer.from('agent-tools'), Buffer.from('audit-chain'), 32)),
+  );
 
   const sessionOf = (req) => {
     const cookies = parseCookies(req.headers.cookie);
@@ -229,29 +238,8 @@ export function createPlatformServer({ db, masterKey }) {
     }
 
     if (path === '/authz') {
-      const app = url.searchParams.get('app');
-      const session = sessionOf(req);
-      if (!session || session.auth_level < 2) {
-        res.writeHead(401);
-        return res.end();
-      }
-      const allowed = db
-        .prepare(
-          `SELECT a.id FROM applications a JOIN access_rules r ON r.application_id = a.id
-            WHERE a.name = ? AND r.role = ? AND a.status = 'active'`,
-        )
-        .get(app, session.role);
-      if (!allowed) {
-        res.writeHead(403);
-        return res.end();
-      }
-      res.writeHead(200, {
-        'X-AT-User': session.user_id,
-        'X-AT-Username': session.username,
-        'X-AT-Roles': session.role,
-        'Cache-Control': 'no-store',
-        Vary: 'Cookie',
-      });
+      const decision = authzDecision(db, req);
+      res.writeHead(decision.status, { ...decision.headers, 'content-type': 'text/plain' });
       return res.end();
     }
 
@@ -667,12 +655,23 @@ export function createPlatformServer({ db, masterKey }) {
     }
 
     const sections = {
-      '/tools': { key: 'tools', render: () => toolsPage({ user: session }) },
+      '/tools': {
+        key: 'tools',
+        render: () => toolsPage({ user: session, inventory: readInventory() }),
+      },
       '/applications': {
         key: 'applications',
-        render: () => applicationsPage({ user: session, apps: listApplications(db) }),
+        render: async () => {
+          const apps = listApplications(db);
+          const health = {};
+          for (const app of apps) health[app.name] = await probeUpstream(app.upstream_url);
+          return applicationsPage({ user: session, apps, health });
+        },
       },
-      '/policy': { key: 'policy', render: () => policyPage({ user: session }) },
+      '/policy': {
+        key: 'policy',
+        render: () => policyPage({ user: session, inventory: readInventory() }),
+      },
       '/audit': {
         key: 'audit',
         render: () =>
@@ -681,13 +680,17 @@ export function createPlatformServer({ db, masterKey }) {
             events: db.prepare('SELECT * FROM auth_events ORDER BY seq DESC LIMIT 100').all(),
           }),
       },
-      '/settings': { key: 'settings', render: () => settingsPage({ user: session, rp }) },
+      '/settings': {
+        key: 'settings',
+        render: () =>
+          settingsPage({ user: session, rp, signing: readSigningKey(), inventory: readInventory() }),
+      },
     };
 
     if (sections[path]) {
       const section = sections[path];
       if (!requireSection(session, res, section.key)) return undefined;
-      return sendHtml(res, 200, section.render());
+      return sendHtml(res, 200, await section.render());
     }
 
     const passkeyRemove = path.match(/^\/me\/security\/passkeys\/([^/]+)\/remove$/);
@@ -709,6 +712,42 @@ export function createPlatformServer({ db, masterKey }) {
       // A retired device must not keep a live session elsewhere.
       if (Number(info.changes) === 1) revokeOtherSessions(db, session.user_id, session.id);
       return redirect(res, '/me/security');
+    }
+
+    if (path === '/me/security/totp/rotate' && req.method === 'POST') {
+      const body = await readBody(req);
+      if (!requireCsrf(session, res, body._csrf)) return undefined;
+      if (!requireStepUp(session, res, '/me/security')) return undefined;
+      const secret = generateSecret();
+      db.prepare(
+        'UPDATE users SET totp_secret = ?, totp_confirmed_at = NULL, totp_last_step = 0 WHERE id = ?',
+      ).run(seal(masterKey, secret, session.user_id), session.user_id);
+      audit(db, { userId: session.user_id, event: 'totp.rotate', factor: 'totp', result: 'ok' });
+      return redirect(res, '/enroll/totp');
+    }
+
+    if (path === '/me/security/recovery/regenerate' && req.method === 'POST') {
+      const body = await readBody(req);
+      if (!requireCsrf(session, res, body._csrf)) return undefined;
+      if (!requireStepUp(session, res, '/me/security')) return undefined;
+      db.prepare('DELETE FROM recovery_codes WHERE user_id = ? AND used_at IS NULL').run(session.user_id);
+      const codes = generateRecoveryCodes(10);
+      storeCodes(db, session.user_id, codes);
+      audit(db, { userId: session.user_id, event: 'recovery.regenerate', factor: 'recovery', result: 'ok' });
+      return sendHtml(res, 200, recoveryCodesPage({ codes, csrf: session.csrf_token }));
+    }
+
+    if (path === '/me/activity') {
+      return sendHtml(
+        res,
+        200,
+        meActivityPage({
+          user: session,
+          events: db
+            .prepare('SELECT * FROM auth_events WHERE user_id = ? ORDER BY seq DESC LIMIT 100')
+            .all(session.user_id),
+        }),
+      );
     }
 
     if (path === '/me/security') {
