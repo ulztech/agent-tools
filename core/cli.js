@@ -2,7 +2,8 @@
 import { parseArgs } from 'node:util';
 import crypto from 'node:crypto';
 import path from 'node:path';
-import { audit, dataDir, openPlatformDb } from './db.js';
+import { dataDir, openPlatformDb } from './db.js';
+import { issueInvite } from './invites.js';
 import { loadMasterKey } from './secretbox.js';
 import { createPlatformServer } from './server.js';
 
@@ -15,9 +16,6 @@ const OPTIONS = {
   port: { type: 'string' },
   host: { type: 'string' },
 };
-
-const newId = (prefix) => `${prefix}_${crypto.randomBytes(9).toString('base64url')}`;
-const sha256 = (value) => crypto.createHash('sha256').update(String(value)).digest('hex');
 
 function out(value) {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
@@ -33,34 +31,6 @@ function open(values) {
   return openPlatformDb(dir);
 }
 
-function issueInvite(db, { username, role, displayName, createdBy = 'cli', ttlMinutes = 60 }) {
-  const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username.toLowerCase());
-  if (user && user.status === 'active') throw new Error(`user is already active: ${username}`);
-
-  const userId = user ? user.id : newId('usr');
-  if (!user) {
-    db.prepare(
-      `INSERT INTO users (id, username, display_name, role, status, created_at)
-       VALUES (?,?,?,?, 'invited', ?)`,
-    ).run(userId, username.toLowerCase(), displayName || username, role, new Date().toISOString());
-  }
-
-  const token = crypto.randomBytes(32).toString('base64url');
-  db.prepare(
-    `INSERT INTO invites (id, user_id, token_hash, created_by, created_at, expires_at, used_at)
-     VALUES (?,?,?,?,?,?,NULL)`,
-  ).run(
-    newId('inv'),
-    userId,
-    sha256(token),
-    createdBy,
-    new Date().toISOString(),
-    new Date(Date.now() + ttlMinutes * 60_000).toISOString(),
-  );
-
-  audit(db, { userId, event: 'user.invite', result: 'ok', detail: `role=${role}` });
-  return { user_id: userId, username: username.toLowerCase(), role, token, expires_in_minutes: ttlMinutes };
-}
 
 async function main() {
   const { values, positionals } = parseArgs({ options: OPTIONS, allowPositionals: true, strict: true });

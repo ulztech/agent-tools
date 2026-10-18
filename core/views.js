@@ -1,4 +1,4 @@
-import { navFor } from './nav.js';
+import { canWrite, navFor } from './nav.js';
 
 export function esc(value) {
   return String(value ?? '')
@@ -45,7 +45,7 @@ button.ghost{background:#fff;color:var(--ink);border-color:var(--line)}
 .center{max-width:420px;margin:9vh auto}
 `;
 
-function shell({ title, user, active, body }) {
+function shell({ title, user, active, body, csrf = '' }) {
   const items = user ? navFor(user.role) : [];
   const nav = items
     .map(
@@ -55,17 +55,23 @@ function shell({ title, user, active, body }) {
     .join('');
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="csrf" content="${esc(csrf)}">
 <title>${esc(title)} · Agent-tools</title><style>${CSS}</style></head><body>
 <header><span class="brand">Agent-tools</span>
-<span class="who">${user ? `${esc(user.username)} · <span class="tag">${esc(user.role)}</span>` : 'not signed in'}</span>
+<span class="who">${user ? `${esc(user.username)} · <span class="tag">${esc(user.role)}</span>` : 'not signed in'}${
+    user
+      ? `<form method="post" action="/auth/logout" style="display:inline;margin-left:12px"><input type="hidden" name="_csrf" value="${esc(csrf)}"><button class="ghost" type="submit" style="padding:3px 9px">Sign out</button></form>`
+      : ''
+  }</span>
 </header>
 <div class="shell">${user ? `<nav>${nav}</nav>` : ''}<main>${body}</main></div>
 </body></html>`;
 }
 
-function bare({ title, body }) {
+function bare({ title, body, csrf = '' }) {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="csrf" content="${esc(csrf)}">
 <title>${esc(title)} · Agent-tools</title><style>${CSS}</style></head>
 <body><div class="center">${body}</div></body></html>`;
 }
@@ -110,6 +116,7 @@ export function totpLoginPage({ error = '', username }) {
 <p class="err">${esc(error)}</p>
 <button type="submit">Verify</button>
 </form>
+<p style="margin-top:14px"><a href="/login/recovery">Use a recovery code instead</a></p>
 </div>`,
   });
 }
@@ -172,30 +179,144 @@ ${launcher}
   });
 }
 
-export function peoplePage({ user, users, sessions }) {
+export function peoplePage({ user, users, sessions, invites = [] }) {
+  const owner = canWrite(user.role, 'people');
+  const csrf = esc(user.csrf_token);
+  const inviteForm = owner
+    ? `<h2>Invite someone</h2>
+<div class="card">
+<form method="post" action="/people/invite">
+<input type="hidden" name="_csrf" value="${csrf}">
+<label class="muted">Username</label>
+<input type="text" name="username" required>
+<label class="muted">Role</label>
+<select name="role">
+<option value="member">member</option>
+<option value="auditor">auditor</option>
+<option value="admin">admin</option>
+<option value="owner">owner</option>
+</select>
+<p></p>
+<button type="submit">Create invite</button>
+</form>
+</div>`
+    : '';
+
   return shell({
     title: 'People',
     user,
     active: 'people',
+    csrf: user.csrf_token,
     body: `<h1>People</h1><p class="lede">Who can sign in, and as what.</p>
 ${table(
-  ['User', 'Role', 'Status', 'Last login'],
+  ['User', 'Role', 'Status', 'Passkeys', 'Last login'],
   users.map((u) => [
-    `<strong>${esc(u.username)}</strong>`,
+    `<a href="/people/${esc(u.id)}"><strong>${esc(u.username)}</strong></a>`,
     `<span class="tag">${esc(u.role)}</span>`,
     esc(u.status),
+    String(u.passkeys ?? 0),
     esc(u.last_login_at || '—'),
+  ]),
+)}
+${inviteForm}
+<h2>Pending invitations</h2>
+${table(
+  ['User', 'Role', 'Expires', ''],
+  invites.map((i) => [
+    esc(i.username),
+    `<span class="tag">${esc(i.role)}</span>`,
+    esc(i.expires_at),
+    owner
+      ? `<form method="post" action="/people/invites/${esc(i.id)}/revoke" style="margin:0"><input type="hidden" name="_csrf" value="${csrf}"><button class="ghost" type="submit">Revoke</button></form>`
+      : '',
   ]),
 )}
 <h2>Live sessions</h2>
 ${table(
-  ['User', 'Level', 'Last seen', 'Expires'],
+  ['User', 'Level', 'Last seen', ''],
   sessions.map((s) => [
     esc(s.username),
     s.auth_level === 2 ? 'L2 (passkey + TOTP)' : 'L1 (passkey only)',
     esc(s.last_seen_at),
-    esc(s.idle_expires_at),
+    owner
+      ? `<form method="post" action="/people/sessions/${esc(s.id)}/revoke" style="margin:0"><input type="hidden" name="_csrf" value="${csrf}"><button class="ghost" type="submit">Revoke</button></form>`
+      : '',
   ]),
+)}`,
+  });
+}
+
+export function inviteCreatedPage({ user, invite }) {
+  return shell({
+    title: 'Invite created',
+    user,
+    active: 'people',
+    csrf: user.csrf_token,
+    body: `<h1>Invite created</h1>
+<p class="lede">Send this link out of band. It is shown once and expires in ${esc(invite.expiresInMinutes)} minutes.</p>
+<div class="card"><p><code>${esc(invite.path)}</code></p>
+<p class="muted" style="margin:0">For <strong>${esc(invite.username)}</strong> as <span class="tag">${esc(invite.role)}</span></p></div>
+<p><a href="/people">Back to People</a></p>`,
+  });
+}
+
+export function userDetailPage({ user, target, creds, sessions, events, recoveryRemaining }) {
+  const owner = canWrite(user.role, 'people') && target.id !== user.id;
+  const csrf = esc(user.csrf_token);
+  const roleOptions = ['member', 'auditor', 'admin', 'owner']
+    .map((r) => `<option value="${r}"${r === target.role ? ' selected' : ''}>${r}</option>`)
+    .join('');
+
+  return shell({
+    title: target.username,
+    user,
+    active: 'people',
+    csrf: user.csrf_token,
+    body: `<h1>${esc(target.username)}</h1>
+<p class="lede">${esc(target.display_name || target.username)} · <span class="tag">${esc(target.role)}</span> · ${esc(target.status)}</p>
+
+${
+  owner
+    ? `<div class="card"><h2 style="margin-top:0">Role</h2>
+<form method="post" action="/people/${esc(target.id)}/role">
+<input type="hidden" name="_csrf" value="${csrf}">
+<select name="role">${roleOptions}</select>
+<button type="submit">Update role</button>
+</form>
+<form method="post" action="/people/${esc(target.id)}/status" style="margin-top:10px">
+<input type="hidden" name="_csrf" value="${csrf}">
+<input type="hidden" name="status" value="${target.status === 'active' ? 'suspended' : 'active'}">
+<button class="ghost" type="submit">${target.status === 'active' ? 'Suspend account' : 'Reactivate account'}</button>
+</form></div>`
+    : ''
+}
+
+<h2>Passkeys</h2>
+${table(
+  ['Passkey', 'Created', 'Last used'],
+  creds.map((c) => [`<code>${esc(c.nickname || c.id)}</code>`, esc(c.created_at), esc(c.last_used_at || '—')]),
+)}
+<h2>Second factor</h2>
+<div class="card"><p style="margin:0">${
+      target.totp_confirmed_at ? '<span class="tag">TOTP enrolled</span>' : '<span class="tag">not enrolled</span>'
+    } · ${recoveryRemaining} recovery codes remaining</p></div>
+
+<h2>Sessions</h2>
+${table(
+  ['Level', 'Last seen', ''],
+  sessions.map((s) => [
+    s.auth_level === 2 ? 'L2' : 'L1',
+    esc(s.last_seen_at),
+    owner
+      ? `<form method="post" action="/people/sessions/${esc(s.id)}/revoke" style="margin:0"><input type="hidden" name="_csrf" value="${csrf}"><button class="ghost" type="submit">Revoke</button></form>`
+      : '',
+  ]),
+)}
+
+<h2>Recent events</h2>
+${table(
+  ['When', 'Event', 'Result'],
+  events.map((e) => [esc(e.ts), `<code>${esc(e.event)}</code>`, esc(e.result)]),
 )}`,
   });
 }
@@ -304,7 +425,7 @@ ${table(
   });
 }
 
-export function meSecurityPage({ user, creds, totpConfirmed }) {
+export function meSecurityPage({ user, creds, totpConfirmed, recoveryRemaining = 0 }) {
   return shell({
     title: 'My security',
     user,
@@ -322,7 +443,54 @@ ${table(
         : '<span class="tag">not enrolled</span>'
     }</p></div>
 <h2>Recovery codes</h2>
-<div class="card"><p class="muted" style="margin:0">Ten single-use codes arrive with C2. They replace the authenticator factor only — never the passkey.</p></div>`,
+<div class="card"><p style="margin:0"><strong>${recoveryRemaining}</strong> unused. A code replaces the authenticator factor once — never the passkey.</p></div>`,
+  });
+}
+
+export function stepUpPage({ next, csrf }) {
+  return bare({
+    title: 'Confirm',
+    csrf,
+    body: `<div class="card">
+<h1>Confirm it's you</h1>
+<p class="lede">This action needs a fresh passkey check. It is valid for five minutes.</p>
+<p class="err" id="err"></p>
+<button id="stepup" data-csrf="${esc(csrf)}" data-next="${esc(next)}">Use passkey</button>
+</div>
+<script src="/assets/stepup.js"></script>`,
+  });
+}
+
+export function recoveryCodesPage({ codes, csrf }) {
+  return bare({
+    title: 'Recovery codes',
+    csrf,
+    body: `<div class="card">
+<h1>Save your recovery codes</h1>
+<p class="lede">Each code can replace your authenticator once. They are shown once and never again.</p>
+<p>${codes.map((c) => `<code>${esc(c)}</code>`).join('<br>')}</p>
+<form method="post" action="/enroll/recovery/ack">
+<input type="hidden" name="_csrf" value="${esc(csrf)}">
+<button type="submit">I have saved them</button>
+</form>
+</div>`,
+  });
+}
+
+export function recoveryLoginPage({ error = '', csrf = '' }) {
+  return bare({
+    title: 'Recovery code',
+    csrf,
+    body: `<div class="card">
+<h1>Use a recovery code</h1>
+<p class="lede">This replaces your authenticator code once.</p>
+<form method="post" action="/auth/recovery">
+<input type="hidden" name="_csrf" value="${esc(csrf)}">
+<input type="text" name="code" placeholder="ABCDE-FGHIJ" required autofocus>
+<p class="err">${esc(error)}</p>
+<button type="submit">Continue</button>
+</form>
+</div>`,
   });
 }
 

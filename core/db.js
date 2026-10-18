@@ -93,6 +93,21 @@ CREATE TABLE IF NOT EXISTS access_rules (
   PRIMARY KEY (role, application_id)
 );
 
+CREATE TABLE IF NOT EXISTS recovery_codes (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  code_hash TEXT NOT NULL,
+  used_at TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS auth_throttle (
+  key TEXT PRIMARY KEY,
+  failures INTEGER NOT NULL DEFAULT 0,
+  window_started_at TEXT NOT NULL,
+  locked_until TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_auth_events_ts ON auth_events (ts);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions (user_id);
 `;

@@ -43,6 +43,44 @@ form.addEventListener('submit', async (event) => {
 });
 `;
 
+export const STEPUP_JS = `${B64}
+const button = document.getElementById('stepup');
+button.addEventListener('click', async () => {
+  const err = document.getElementById('err');
+  err.textContent = '';
+  button.disabled = true;
+  try {
+    const optsRes = await fetch('/auth/stepup/options', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    const { options } = await optsRes.json();
+    options.challenge = b64.toBuf(options.challenge);
+    options.allowCredentials = (options.allowCredentials || []).map((c) => ({ ...c, id: b64.toBuf(c.id) }));
+    const cred = await navigator.credentials.get({ publicKey: options });
+    const response = {
+      id: cred.id,
+      rawId: b64.fromBuf(cred.rawId),
+      type: cred.type,
+      clientExtensionResults: cred.getClientExtensionResults(),
+      response: {
+        clientDataJSON: b64.fromBuf(cred.response.clientDataJSON),
+        authenticatorData: b64.fromBuf(cred.response.authenticatorData),
+        signature: b64.fromBuf(cred.response.signature),
+        userHandle: cred.response.userHandle ? b64.fromBuf(cred.response.userHandle) : null,
+      },
+    };
+    const verify = await fetch('/auth/stepup/verify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-csrf-token': button.dataset.csrf },
+      body: JSON.stringify({ response }),
+    });
+    if (!verify.ok) throw new Error((await verify.json()).error || 'Step-up failed');
+    location.href = button.dataset.next || '/';
+  } catch (e) {
+    err.textContent = e.message || 'Step-up failed';
+    button.disabled = false;
+  }
+});
+`;
+
 export const ENROLL_JS = `${B64}
 document.getElementById('start').addEventListener('click', async () => {
   const err = document.getElementById('err');

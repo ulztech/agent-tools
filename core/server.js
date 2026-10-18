@@ -1,16 +1,19 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
-import { audit, findUser, listApplications, seedDurablePi, userById } from './db.js';
+import { audit, listApplications, seedDurablePi, userById } from './db.js';
 import {
   SESSION_COOKIE,
   createSession,
   elevateSession,
+  isStepUpFresh,
   liveSessions,
   loadSession,
+  markStepUp,
+  revokeAllForUser,
   revokeSession,
   touchSession,
 } from './sessions.js';
-import { canSee } from './nav.js';
+import { canSee, canWrite } from './nav.js';
 import {
   AuthError,
   beginAuthentication,
@@ -21,22 +24,30 @@ import {
 } from './webauthn.js';
 import { generateSecret, otpauthUri, verifyTotp } from './totp.js';
 import { open as openSealed, seal } from './secretbox.js';
+import { consumeCode, generateRecoveryCodes, remainingCodes, storeCodes } from './recovery.js';
+import { clearFailures, isLocked, recordFailure } from './throttle.js';
+import { consumeInvite, inviteByToken, issueInvite, pendingInvites } from './invites.js';
 import {
   applicationsPage,
   auditPage,
   enrollPage,
   enrollTotpPage,
   errorPage,
+  inviteCreatedPage,
   loginPage,
   meSecurityPage,
   overviewPage,
   peoplePage,
   policyPage,
+  recoveryCodesPage,
+  recoveryLoginPage,
   settingsPage,
+  stepUpPage,
   toolsPage,
   totpLoginPage,
+  userDetailPage,
 } from './views.js';
-import { LOGIN_JS, ENROLL_JS } from './assets.js';
+import { ENROLL_JS, LOGIN_JS, STEPUP_JS } from './assets.js';
 
 const MAX_BODY = 1_000_000;
 
@@ -53,18 +64,9 @@ function send(res, status, body, headers = {}) {
   res.writeHead(status, { ...SECURITY_HEADERS, ...headers });
   res.end(body);
 }
-
-function sendHtml(res, status, html) {
-  send(res, status, html, { 'content-type': 'text/html; charset=utf-8' });
-}
-
-function sendJson(res, status, obj) {
-  send(res, status, JSON.stringify(obj), { 'content-type': 'application/json' });
-}
-
-function redirect(res, location) {
-  send(res, 303, '', { Location: location });
-}
+const sendHtml = (res, status, html) => send(res, status, html, { 'content-type': 'text/html; charset=utf-8' });
+const sendJson = (res, status, obj) => send(res, status, JSON.stringify(obj), { 'content-type': 'application/json' });
+const redirect = (res, location) => send(res, 303, '', { Location: location });
 
 function parseCookies(header) {
   const out = {};
@@ -77,12 +79,8 @@ function parseCookies(header) {
 }
 
 function setSessionCookie(res, id) {
-  res.setHeader(
-    'Set-Cookie',
-    `${SESSION_COOKIE}=${id}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=28800`,
-  );
+  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${id}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=28800`);
 }
-
 function clearSessionCookie(res) {
   res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`);
 }
@@ -101,7 +99,11 @@ async function readBody(req) {
   return Object.fromEntries(new URLSearchParams(raw));
 }
 
-const sha256 = (value) => crypto.createHash('sha256').update(String(value)).digest('hex');
+function sameToken(a, b) {
+  const x = Buffer.from(String(a || ''));
+  const y = Buffer.from(String(b || ''));
+  return x.length === y.length && x.length > 0 && crypto.timingSafeEqual(x, y);
+}
 
 export function createPlatformServer({ db, masterKey }) {
   const rp = rpConfig();
@@ -114,14 +116,10 @@ export function createPlatformServer({ db, masterKey }) {
     return session;
   };
 
-  const inviteFor = (token) => {
-    const row = db.prepare('SELECT * FROM invites WHERE token_hash = ?').get(sha256(token));
-    if (!row || row.used_at) return null;
-    if (Date.parse(row.expires_at) < Date.now()) return null;
-    return row;
-  };
-
   const secretFor = (user) => (user.totp_secret ? openSealed(masterKey, user.totp_secret, user.id) : null);
+
+  const forbid = (res, session, message) =>
+    sendHtml(res, 403, errorPage({ status: 403, message, user: session }));
 
   const requireL2 = (session, res) => {
     if (!session) {
@@ -137,11 +135,32 @@ export function createPlatformServer({ db, masterKey }) {
 
   const requireSection = (session, res, key) => {
     if (!canSee(session.role, key)) {
-      sendHtml(res, 403, errorPage({ status: 403, message: 'Your role does not include this section.', user: session }));
+      forbid(res, session, 'Your role does not include this section.');
       return false;
     }
     return true;
   };
+
+  const requireCsrf = (session, res, token) => {
+    if (sameToken(token, session.csrf_token)) return true;
+    forbid(res, session, 'That form expired. Reload the page and try again.');
+    return false;
+  };
+
+  const requireStepUp = (session, res, next) => {
+    if (isStepUpFresh(session)) return true;
+    redirect(res, `/step-up?next=${encodeURIComponent(next)}`);
+    return false;
+  };
+
+  const requireOwner = (session, res) => {
+    if (canWrite(session.role, 'people')) return true;
+    forbid(res, session, 'Only an owner can manage people.');
+    return false;
+  };
+
+  const ownerCount = () =>
+    db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'owner' AND status = 'active'").get().n;
 
   async function route(req, res) {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -151,12 +170,8 @@ export function createPlatformServer({ db, masterKey }) {
 
     if (path === '/healthz') return sendJson(res, 200, { ok: true });
 
-    if (path === '/assets/login.js') {
-      return send(res, 200, LOGIN_JS, { 'content-type': 'text/javascript; charset=utf-8' });
-    }
-    if (path === '/assets/enroll.js') {
-      return send(res, 200, ENROLL_JS, { 'content-type': 'text/javascript; charset=utf-8' });
-    }
+    const assets = { '/assets/login.js': LOGIN_JS, '/assets/enroll.js': ENROLL_JS, '/assets/stepup.js': STEPUP_JS };
+    if (assets[path]) return send(res, 200, assets[path], { 'content-type': 'text/javascript; charset=utf-8' });
 
     if (path === '/login' && req.method === 'GET') {
       const session = sessionOf(req);
@@ -167,20 +182,26 @@ export function createPlatformServer({ db, masterKey }) {
 
     if (path === '/auth/options' && req.method === 'POST') {
       const { username } = await readBody(req);
+      if (isLocked(db, `passkey:${String(username || '').toLowerCase()}`)) {
+        return sendJson(res, 429, { error: 'Too many attempts. Try again later.' });
+      }
       const { options } = await beginAuthentication(db, username);
       return sendJson(res, 200, { options });
     }
 
     if (path === '/auth/verify' && req.method === 'POST') {
       const { username, response } = await readBody(req);
+      const key = `passkey:${String(username || '').toLowerCase()}`;
       try {
         const { user } = await finishAuthentication(db, response);
+        clearFailures(db, key);
         const session = createSession(db, { userId: user.id, authLevel: 1, ip: req.socket.remoteAddress });
         db.prepare('UPDATE users SET last_login_at = ? WHERE id = ?').run(new Date().toISOString(), user.id);
         audit(db, { userId: user.id, event: 'login.passkey', factor: 'passkey', result: 'ok', ip: req.socket.remoteAddress });
         setSessionCookie(res, session.id);
         return sendJson(res, 200, { ok: true, next: '/login/totp' });
       } catch (err) {
+        recordFailure(db, key);
         audit(db, { userId: null, event: 'login.passkey', factor: 'passkey', result: 'fail', detail: err.code || err.message });
         throw err;
       }
@@ -215,31 +236,30 @@ export function createPlatformServer({ db, masterKey }) {
     /* ---------------- enrolment ---------------- */
 
     if (path === '/enroll' && req.method === 'GET') {
-      const invite = inviteFor(url.searchParams.get('token'));
-      if (!invite) return sendHtml(res, 400, errorPage({ status: 400, message: 'This invite is invalid or has expired.' }));
+      if (!inviteByToken(db, url.searchParams.get('token'))) {
+        return sendHtml(res, 400, errorPage({ status: 400, message: 'This invite is invalid or has expired.' }));
+      }
       return sendHtml(res, 200, enrollPage({ token: url.searchParams.get('token') }));
     }
 
     if (path === '/enroll/options' && req.method === 'POST') {
       const { token } = await readBody(req);
-      const invite = inviteFor(token);
+      const invite = inviteByToken(db, token);
       if (!invite) throw new AuthError('E_INVITE', 'invite is invalid or expired');
-      const user = userById(db, invite.user_id);
-      const options = await beginRegistration(db, user);
+      const options = await beginRegistration(db, userById(db, invite.user_id));
       return sendJson(res, 200, { options });
     }
 
     if (path === '/enroll/verify' && req.method === 'POST') {
       const { token, response } = await readBody(req);
-      const invite = inviteFor(token);
-      if (!invite) throw new AuthError('E_INVITE', 'invite is invalid or expired');
+      const invite = consumeInvite(db, token);
+      if (!invite) throw new AuthError('E_INVITE', 'invite is invalid, expired or already used');
       const user = userById(db, invite.user_id);
       await finishRegistration(db, user, response);
 
-      db.prepare('UPDATE invites SET used_at = ? WHERE id = ?').run(new Date().toISOString(), invite.id);
-      let secret = secretFor(user);
-      if (!secret) {
-        secret = generateSecret();
+      const fresh = userById(db, user.id);
+      if (!fresh.totp_secret) {
+        const secret = generateSecret();
         db.prepare('UPDATE users SET totp_secret = ? WHERE id = ?').run(seal(masterKey, secret, user.id), user.id);
       }
       db.prepare("UPDATE users SET status = 'active' WHERE id = ?").run(user.id);
@@ -268,16 +288,43 @@ export function createPlatformServer({ db, masterKey }) {
       const step = secret ? verifyTotp(secret, code, user.totp_last_step) : null;
       if (!step) {
         audit(db, { userId: user.id, event: 'totp.enrol', factor: 'totp', result: 'fail' });
-        return sendHtml(res, 400, enrollTotpPage({ secret, uri: otpauthUri({ account: user.username, secret }), error: 'That code did not match. Try the next one.' }));
+        return sendHtml(
+          res,
+          400,
+          enrollTotpPage({
+            secret,
+            uri: otpauthUri({ account: user.username, secret }),
+            error: 'That code did not match. Try the next one.',
+          }),
+        );
       }
-      db.prepare('UPDATE users SET totp_last_step = ?, totp_confirmed_at = ? WHERE id = ?').run(step, new Date().toISOString(), user.id);
+      db.prepare('UPDATE users SET totp_last_step = ?, totp_confirmed_at = ? WHERE id = ?').run(
+        step,
+        new Date().toISOString(),
+        user.id,
+      );
       audit(db, { userId: user.id, event: 'totp.enrol', factor: 'totp', result: 'ok' });
+
       const elevated = elevateSession(db, session.id);
       setSessionCookie(res, elevated.id);
+
+      if (remainingCodes(db, user.id) === 0) {
+        const codes = generateRecoveryCodes(10);
+        storeCodes(db, user.id, codes);
+        return sendHtml(res, 200, recoveryCodesPage({ codes, csrf: elevated.csrf_token }));
+      }
       return redirect(res, '/');
     }
 
-    /* ---------------- login second factor ---------------- */
+    if (path === '/enroll/recovery/ack' && req.method === 'POST') {
+      const session = sessionOf(req);
+      if (!requireL2(session, res)) return undefined;
+      const body = await readBody(req);
+      if (!requireCsrf(session, res, body._csrf)) return undefined;
+      return redirect(res, '/');
+    }
+
+    /* ---------------- second factor at login ---------------- */
 
     if (path === '/login/totp' && req.method === 'GET') {
       const session = sessionOf(req);
@@ -286,17 +333,50 @@ export function createPlatformServer({ db, masterKey }) {
       return sendHtml(res, 200, totpLoginPage({ username: session.username }));
     }
 
+    if (path === '/login/recovery' && req.method === 'GET') {
+      const session = sessionOf(req);
+      if (!session) return redirect(res, '/login');
+      return sendHtml(res, 200, recoveryLoginPage({ csrf: session.csrf_token }));
+    }
+
+    if (path === '/auth/recovery' && req.method === 'POST') {
+      const session = sessionOf(req);
+      if (!session) return redirect(res, '/login');
+      const body = await readBody(req);
+      if (!requireCsrf(session, res, body._csrf)) return undefined;
+      const key = `recovery:${session.user_id}`;
+      if (isLocked(db, key)) {
+        return sendHtml(res, 429, recoveryLoginPage({ error: 'Too many attempts. Try again later.', csrf: session.csrf_token }));
+      }
+      if (!consumeCode(db, session.user_id, body.code)) {
+        recordFailure(db, key);
+        audit(db, { userId: session.user_id, event: 'recovery.use', factor: 'recovery', result: 'fail' });
+        return sendHtml(res, 401, recoveryLoginPage({ error: 'That code is not valid.', csrf: session.csrf_token }));
+      }
+      clearFailures(db, key);
+      audit(db, { userId: session.user_id, event: 'recovery.use', factor: 'recovery', result: 'ok' });
+      const elevated = elevateSession(db, session.id);
+      setSessionCookie(res, elevated.id);
+      return redirect(res, '/');
+    }
+
     if (path === '/auth/totp' && req.method === 'POST') {
       const session = sessionOf(req);
       if (!session) return redirect(res, '/login');
       const user = userById(db, session.user_id);
-      const secret = secretFor(user);
+      const key = `totp:${user.id}`;
       const { code } = await readBody(req);
+      if (isLocked(db, key)) {
+        return sendHtml(res, 429, totpLoginPage({ username: session.username, error: 'Too many attempts. Try again later.' }));
+      }
+      const secret = secretFor(user);
       const step = secret ? verifyTotp(secret, code, user.totp_last_step) : null;
       if (!step) {
+        recordFailure(db, key);
         audit(db, { userId: user.id, event: 'login.totp', factor: 'totp', result: 'fail' });
         return sendHtml(res, 401, totpLoginPage({ username: session.username, error: 'That code did not match.' }));
       }
+      clearFailures(db, key);
       db.prepare('UPDATE users SET totp_last_step = ? WHERE id = ?').run(step, user.id);
       audit(db, { userId: user.id, event: 'login.totp', factor: 'totp', result: 'ok' });
       const elevated = elevateSession(db, session.id);
@@ -306,17 +386,46 @@ export function createPlatformServer({ db, masterKey }) {
 
     if (path === '/auth/logout' && req.method === 'POST') {
       const session = sessionOf(req);
-      if (session) {
-        revokeSession(db, session.id);
-        audit(db, { userId: session.user_id, event: 'session.revoke', result: 'ok' });
-      }
+      if (!session) return redirect(res, '/login');
+      const body = await readBody(req);
+      if (!requireCsrf(session, res, body._csrf)) return undefined;
+      revokeSession(db, session.id);
+      audit(db, { userId: session.user_id, event: 'session.revoke', result: 'ok' });
       clearSessionCookie(res);
       return redirect(res, '/login');
     }
 
-    /* ---------------- console ---------------- */
+    /* ---------------- step-up ---------------- */
 
     const session = sessionOf(req);
+
+    if (path === '/step-up' && req.method === 'GET') {
+      if (!requireL2(session, res)) return undefined;
+      const next = url.searchParams.get('next') || '/';
+      return sendHtml(res, 200, stepUpPage({ next: next.startsWith('/') ? next : '/', csrf: session.csrf_token }));
+    }
+
+    if (path === '/auth/stepup/options' && req.method === 'POST') {
+      if (!requireL2(session, res)) return undefined;
+      const { options } = await beginAuthentication(db, session.username);
+      return sendJson(res, 200, { options });
+    }
+
+    if (path === '/auth/stepup/verify' && req.method === 'POST') {
+      if (!requireL2(session, res)) return undefined;
+      if (!sameToken(req.headers['x-csrf-token'], session.csrf_token)) {
+        return sendJson(res, 403, { error: 'CSRF token missing or invalid' });
+      }
+      const { response } = await readBody(req);
+      const { user } = await finishAuthentication(db, response);
+      if (user.id !== session.user_id) return sendJson(res, 403, { error: 'Step-up used a different account' });
+      markStepUp(db, session.id);
+      audit(db, { userId: user.id, event: 'stepup.ok', factor: 'passkey', result: 'ok' });
+      return sendJson(res, 200, { ok: true });
+    }
+
+    /* ---------------- console ---------------- */
+
     if (!requireL2(session, res)) return undefined;
 
     if (path === '/') {
@@ -338,21 +447,162 @@ export function createPlatformServer({ db, masterKey }) {
       return sendHtml(res, 200, overviewPage({ user: session, apps, counts }));
     }
 
-    const sections = {
-      '/people': { key: 'people', render: () =>
+    /* ---- people: collection actions ---- */
+
+    if (path === '/people/invite' && req.method === 'POST') {
+      if (!requireSection(session, res, 'people')) return undefined;
+      if (!requireOwner(session, res)) return undefined;
+      const body = await readBody(req);
+      if (!requireCsrf(session, res, body._csrf)) return undefined;
+      if (!requireStepUp(session, res, '/people')) return undefined;
+      const invite = issueInvite(db, {
+        username: body.username,
+        role: body.role || 'member',
+        createdBy: session.user_id,
+        ttlMinutes: 60,
+      });
+      return sendHtml(
+        res,
+        200,
+        inviteCreatedPage({
+          user: session,
+          invite: { path: invite.path, username: invite.username, role: invite.role, expiresInMinutes: invite.expiresInMinutes },
+        }),
+      );
+    }
+
+    const sessionRevoke = path.match(/^\/people\/sessions\/([^/]+)\/revoke$/);
+    if (sessionRevoke && req.method === 'POST') {
+      if (!requireSection(session, res, 'people')) return undefined;
+      if (!requireOwner(session, res)) return undefined;
+      const body = await readBody(req);
+      if (!requireCsrf(session, res, body._csrf)) return undefined;
+      revokeSession(db, sessionRevoke[1]);
+      audit(db, { userId: session.user_id, event: 'session.revoke', result: 'ok', detail: `target=${sessionRevoke[1]}` });
+      return redirect(res, '/people');
+    }
+
+    const inviteRevoke = path.match(/^\/people\/invites\/([^/]+)\/revoke$/);
+    if (inviteRevoke && req.method === 'POST') {
+      if (!requireSection(session, res, 'people')) return undefined;
+      if (!requireOwner(session, res)) return undefined;
+      const body = await readBody(req);
+      if (!requireCsrf(session, res, body._csrf)) return undefined;
+      db.prepare('UPDATE invites SET used_at = ? WHERE id = ? AND used_at IS NULL').run(
+        new Date().toISOString(),
+        inviteRevoke[1],
+      );
+      audit(db, { userId: session.user_id, event: 'user.invite', result: 'revoked', detail: inviteRevoke[1] });
+      return redirect(res, '/people');
+    }
+
+    /* ---- people: one user ---- */
+
+    const roleChange = path.match(/^\/people\/([^/]+)\/role$/);
+    if (roleChange && req.method === 'POST') {
+      if (!requireSection(session, res, 'people')) return undefined;
+      if (!requireOwner(session, res)) return undefined;
+      const body = await readBody(req);
+      if (!requireCsrf(session, res, body._csrf)) return undefined;
+      if (!requireStepUp(session, res, `/people/${roleChange[1]}`)) return undefined;
+      const target = userById(db, roleChange[1]);
+      const role = body.role;
+      if (!target || !['owner', 'admin', 'auditor', 'member'].includes(role)) {
+        return forbid(res, session, 'That role is not valid.');
+      }
+      if (target.id === session.user_id) return forbid(res, session, 'You cannot change your own role.');
+      if (target.role === 'owner' && role !== 'owner' && ownerCount() <= 1) {
+        return forbid(res, session, 'At least one owner must remain.');
+      }
+      db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role, target.id);
+      revokeAllForUser(db, target.id);
+      audit(db, { userId: session.user_id, event: 'user.role', result: 'ok', detail: `${target.username}:${role}` });
+      return redirect(res, `/people/${target.id}`);
+    }
+
+    const statusChange = path.match(/^\/people\/([^/]+)\/status$/);
+    if (statusChange && req.method === 'POST') {
+      if (!requireSection(session, res, 'people')) return undefined;
+      if (!requireOwner(session, res)) return undefined;
+      const body = await readBody(req);
+      if (!requireCsrf(session, res, body._csrf)) return undefined;
+      if (!requireStepUp(session, res, `/people/${statusChange[1]}`)) return undefined;
+      const target = userById(db, statusChange[1]);
+      const status = body.status === 'suspended' ? 'suspended' : 'active';
+      if (!target) return forbid(res, session, 'That user does not exist.');
+      if (target.id === session.user_id) return forbid(res, session, 'You cannot suspend your own account.');
+      if (target.role === 'owner' && status === 'suspended' && ownerCount() <= 1) {
+        return forbid(res, session, 'At least one owner must remain active.');
+      }
+      db.prepare('UPDATE users SET status = ?, disabled_at = ? WHERE id = ?').run(
+        status,
+        status === 'suspended' ? new Date().toISOString() : null,
+        target.id,
+      );
+      if (status === 'suspended') revokeAllForUser(db, target.id);
+      audit(db, { userId: session.user_id, event: 'user.status', result: 'ok', detail: `${target.username}:${status}` });
+      return redirect(res, `/people/${target.id}`);
+    }
+
+    const userMatch = path.match(/^\/people\/([^/]+)$/);
+    if (userMatch && req.method === 'GET') {
+      if (!requireSection(session, res, 'people')) return undefined;
+      const target = userById(db, userMatch[1]);
+      if (!target) return sendHtml(res, 404, errorPage({ status: 404, message: 'No such user.', user: session }));
+      return sendHtml(
+        res,
+        200,
+        userDetailPage({
+          user: session,
+          target,
+          creds: db.prepare('SELECT * FROM webauthn_creds WHERE user_id = ? ORDER BY created_at').all(target.id),
+          sessions: db
+            .prepare('SELECT * FROM sessions WHERE user_id = ? AND revoked_at IS NULL ORDER BY last_seen_at DESC')
+            .all(target.id),
+          events: db
+            .prepare('SELECT * FROM auth_events WHERE user_id = ? ORDER BY seq DESC LIMIT 20')
+            .all(target.id),
+          recoveryRemaining: remainingCodes(db, target.id),
+        }),
+      );
+    }
+
+    /* ---- sections ---- */
+
+    if (path === '/people') {
+      if (!requireSection(session, res, 'people')) return undefined;
+      return sendHtml(
+        res,
+        200,
         peoplePage({
           user: session,
-          users: db.prepare('SELECT * FROM users ORDER BY username').all(),
+          users: db
+            .prepare(
+              `SELECT u.*, (SELECT COUNT(*) FROM webauthn_creds c WHERE c.user_id = u.id) AS passkeys
+                 FROM users u ORDER BY u.username`,
+            )
+            .all(),
           sessions: liveSessions(db),
-        }) },
+          invites: pendingInvites(db),
+        }),
+      );
+    }
+
+    const sections = {
       '/tools': { key: 'tools', render: () => toolsPage({ user: session }) },
-      '/applications': { key: 'applications', render: () => applicationsPage({ user: session, apps: listApplications(db) }) },
+      '/applications': {
+        key: 'applications',
+        render: () => applicationsPage({ user: session, apps: listApplications(db) }),
+      },
       '/policy': { key: 'policy', render: () => policyPage({ user: session }) },
-      '/audit': { key: 'audit', render: () =>
-        auditPage({
-          user: session,
-          events: db.prepare('SELECT * FROM auth_events ORDER BY seq DESC LIMIT 100').all(),
-        }) },
+      '/audit': {
+        key: 'audit',
+        render: () =>
+          auditPage({
+            user: session,
+            events: db.prepare('SELECT * FROM auth_events ORDER BY seq DESC LIMIT 100').all(),
+          }),
+      },
       '/settings': { key: 'settings', render: () => settingsPage({ user: session, rp }) },
     };
 
@@ -364,8 +614,16 @@ export function createPlatformServer({ db, masterKey }) {
 
     if (path === '/me/security') {
       const user = userById(db, session.user_id);
-      const creds = db.prepare('SELECT * FROM webauthn_creds WHERE user_id = ? ORDER BY created_at').all(user.id);
-      return sendHtml(res, 200, meSecurityPage({ user: session, creds, totpConfirmed: Boolean(user.totp_confirmed_at) }));
+      return sendHtml(
+        res,
+        200,
+        meSecurityPage({
+          user: session,
+          creds: db.prepare('SELECT * FROM webauthn_creds WHERE user_id = ? ORDER BY created_at').all(user.id),
+          totpConfirmed: Boolean(user.totp_confirmed_at),
+          recoveryRemaining: remainingCodes(db, user.id),
+        }),
+      );
     }
 
     return sendHtml(res, 404, errorPage({ status: 404, message: 'That page does not exist.', user: session }));
@@ -375,12 +633,11 @@ export function createPlatformServer({ db, masterKey }) {
     route(req, res).catch((err) => {
       if (res.headersSent) return;
       const status = err instanceof AuthError ? 401 : 400;
-      const wantsJson = String(req.headers.accept || '').includes('application/json') ||
+      const wantsJson =
+        String(req.headers.accept || '').includes('application/json') ||
         String(req.headers['content-type'] || '').includes('application/json');
       if (wantsJson) return sendJson(res, status, { error: err.code || err.message });
       return sendHtml(res, status, errorPage({ status, message: err.message }));
     });
   });
 }
-
-export { findUser };
