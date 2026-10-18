@@ -42,15 +42,16 @@ Expected:
 
 | Service | Ports | Networks |
 |---|---|---|
-| `platform` | `127.0.0.1:8443` | `cp-net`, `authz-net` |
-| `caddy` | `:443` | `edge-net`, `authz-net`, `app-net` |
+| `platform` | **none** | `cp-net`, `authz-net` |
+| `caddy` | `127.0.0.1:8443` · `:443` | `cp-net`, `authz-net`, `app-net`, `edge-net` |
 | `durable-pi` | none | `app-net` |
 
 ## 4. Verify isolation (do this before enrolling anyone)
 
 ```bash
-# 1. The control plane publishes nothing but loopback.
-docker compose port platform            # -> 127.0.0.1:8443
+# 1. The control plane publishes nothing at all. Caddy does, on loopback.
+docker compose port platform 8443       # -> empty
+docker compose port caddy 8443          # -> 127.0.0.1:8443
 ss -ltnp | grep 8443                    # -> 127.0.0.1 only
 
 # 2. cp-net has no gateway.
