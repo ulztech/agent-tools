@@ -28,21 +28,35 @@ export function readInventory(dir = gatewayDataDir()) {
   const file = path.join(dir, 'gateway.sqlite');
   if (!fs.existsSync(file)) return { ...empty, reason: 'gateway store not found' };
 
-  let db;
-  let snapshot = null;
+  // Always read from a snapshot. The store is normally a WAL database on a read-only
+  // mount, where SQLite cannot create the -shm it needs: the open succeeds and the first
+  // query fails. A copy removes that whole class of failure.
+  const size = fs.statSync(file).size;
+  if (size > 256 * 1024 * 1024) {
+    return { ...empty, reason: 'gateway store is too large to snapshot for console display' };
+  }
+
+  const snapshot = path.join(
+    os.tmpdir(),
+    `at-inventory-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.sqlite`,
+  );
   try {
-    try {
-      db = new DatabaseSync(file, { readOnly: true });
-    } catch {
-      // A WAL database cannot be opened read-only from a read-only mount (SQLite needs
-      // the -shm). Work on a snapshot instead of failing the page.
-      snapshot = path.join(os.tmpdir(), `at-inventory-${process.pid}-${Date.now()}.sqlite`);
-      fs.copyFileSync(file, snapshot);
-      for (const suffix of ['-wal', '-shm']) {
-        if (fs.existsSync(`${file}${suffix}`)) fs.copyFileSync(`${file}${suffix}`, `${snapshot}${suffix}`);
-      }
-      db = new DatabaseSync(snapshot);
+    fs.copyFileSync(file, snapshot);
+    for (const suffix of ['-wal', '-shm']) {
+      if (fs.existsSync(`${file}${suffix}`)) fs.copyFileSync(`${file}${suffix}`, `${snapshot}${suffix}`);
     }
+  } catch (err) {
+    try {
+      fs.unlinkSync(snapshot);
+    } catch {
+      /* best effort */
+    }
+    return { ...empty, reason: `could not snapshot the gateway store: ${err.message}` };
+  }
+
+  let db;
+  try {
+    db = new DatabaseSync(snapshot);
     db.exec('PRAGMA busy_timeout = 500;');
     return {
       available: true,

@@ -248,3 +248,18 @@ test('authz listener: serves only /authz, and never a bearer value', async () =>
     authz.close();
   }
 });
+
+test('inventory: reads a live WAL store, as on a read-only mount', () => {
+  const dir = tempDir();
+  const { db } = openGatewayDb(dir); // WAL is enabled here
+  db.prepare(
+    `INSERT INTO tools (id, name, profile, created_at) VALUES ('t1','database-gateway','network',?)`,
+  ).run(new Date().toISOString());
+
+  // Keep the handle open so the rows live in the -wal file, not the main database.
+  const inv = readInventory(dir);
+  db.close();
+
+  assert.equal(inv.available, true);
+  assert.equal(inv.tools[0].name, 'database-gateway');
+});
