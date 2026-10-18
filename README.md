@@ -25,6 +25,10 @@ agent ──query──► gateway ──► read-only gate ──► database
 - **Credentials leave client configs.** Connections (host, port, user, password,
   database) are stored as one encrypted secret inside the gateway. MCP client configs
   carry a connection *name*, never a password.
+- **Agents hold an asymmetric passkey, not a bearer token.** Creating a connection issues
+  an ES256 service passkey bound to it. The private key stays on the agent host; the
+  gateway stores only the public key and a reads-only envelope. A mint request is
+  **signed**, never transmitted with the key.
 - **Masked columns are masked on egress.** Every returned column is resolved against
   the connection's masking registry. When the source of a column cannot be resolved
   from the query, it is matched **by column name** — because this gateway never blocks
@@ -76,10 +80,12 @@ before every commit; it is the same command the pipeline's tester gate runs.
 node src/cli.js init
 node src/cli.js connection add --name hris --engine mysql --host 127.0.0.1 --port 3306 \
   --user hruser --password '***' --database hris-regression
+#   -> prints svc_id, kid and the key file path; the private key is written 0600
 node src/cli.js registry set --connection hris --table employee --column email --strategy mask
-node src/cli.js registry list --connection hris
-node src/cli.js key mint --connection hris --label agent-1 --ttl 30d
-node src/cli.js cap mint --key dbg_... --ttl 900
+node src/cli.js svc enroll --connection hris --label agent-2 --ttl 90d
+node src/cli.js svc list
+node src/cli.js svc revoke --id svc_...
+node src/cli.js cap mint --svc svc_... --key-file .data/keys/hris.pem --ttl 900
 node src/cli.js query --cap atkcap_... --sql "select id, email from employee limit 5"
 node src/cli.js audit verify
 node src/cli.js jwks

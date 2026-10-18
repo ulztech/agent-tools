@@ -5,13 +5,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { appendAudit, ensureTool, openDb, verifyAudit } from './store.js';
 import {
+  generateServiceCredential,
   getToolDek,
-  hashAccessKey,
   jwksOf,
   loadMasterKey,
   loadSigningKey,
   mintCapability,
   sealWithDek,
+  signMintRequest,
+  verifyServiceMint,
 } from './crypto.js';
 import { buildRedactionPlan, listRegistry, removeRegistryRule, setRegistryRule } from './masking.js';
 import { TOOL_NAME, RESOURCE_PREFIX, runQuery } from './query.js';
@@ -34,7 +36,9 @@ const OPTIONS = {
   label: { type: 'string' },
   ttl: { type: 'string' },
   id: { type: 'string' },
-  key: { type: 'string' },
+  svc: { type: 'string' },
+  'key-file': { type: 'string' },
+  session: { type: 'string' },
   cap: { type: 'string' },
   sql: { type: 'string' },
   'max-rows': { type: 'string' },
@@ -75,7 +79,7 @@ function cmdInit(values) {
 }
 
 function cmdConnection(values, sub) {
-  const { db, masterKey, tool } = ctx(values);
+  const { db, dir, masterKey, tool } = ctx(values);
 
   if (sub === 'add') {
     const name = requireOpt(values, 'name');
@@ -99,7 +103,25 @@ function cmdConnection(values, sub) {
     db.prepare(
       'INSERT INTO connection_secrets (connection_id, iv, tag, ct, key_version) VALUES (?,?,?,?,1)',
     ).run(id, sealed.iv, sealed.tag, sealed.ct);
-    out({ ok: true, id, name, engine: values.engine || 'mysql', note: 'secret stored sealed; never printed again' });
+
+    // D28: the connection is created together with its first service passkey.
+    const svc = issueServiceCredential(db, {
+      connectionId: id,
+      label: `svc-${name}`,
+      ttl: values.ttl || '90d',
+      delegatedBy: 'cli:local',
+      dir,
+      fileName: name,
+    });
+
+    out({
+      ok: true,
+      id,
+      name,
+      engine: values.engine || 'mysql',
+      service_passkey: { svc_id: svc.id, kid: svc.kid, key_file: svc.keyFile, expires_at: svc.expiresAt },
+      note: 'secret stored sealed; the private key is in the key file and is never printed again',
+    });
     return db.close();
   }
 
@@ -119,6 +141,45 @@ function cmdConnection(values, sub) {
   }
 
   throw new GatewayError('E_USAGE', `unknown connection subcommand: ${sub}`);
+}
+
+/**
+ * Issue a service passkey bound to one connection (D28). The private key is written to
+ * the data dir with 0600 and never stored anywhere else; the gateway keeps the public key.
+ */
+function issueServiceCredential(db, { connectionId, label, ttl, delegatedBy, dir, fileName }) {
+  const cred = generateServiceCredential();
+  const envelope = {
+    connection_id: connectionId,
+    action: 'query.read',
+    max_ttl: 900,
+    daily_quota: 2000,
+    delegated_by: delegatedBy,
+  };
+  const id = newId('svc');
+  const expiresAt = new Date(Date.now() + parseTtl(ttl, 90 * 86400) * 1000).toISOString();
+  db.prepare(
+    `INSERT INTO service_credentials
+       (id, connection_id, label, kid, alg, public_key_jwk, envelope, created_at, expires_at)
+     VALUES (?,?,?,?,?,?,?,?,?)`,
+  ).run(
+    id,
+    connectionId,
+    label,
+    cred.kid,
+    'ES256',
+    JSON.stringify(cred.publicKeyJwk),
+    JSON.stringify(envelope),
+    nowIso(),
+    expiresAt,
+  );
+
+  const keysDir = path.join(dir, 'keys');
+  fs.mkdirSync(keysDir, { recursive: true, mode: 0o700 });
+  const keyFile = path.join(keysDir, `${fileName || id}.pem`);
+  fs.writeFileSync(keyFile, cred.privateKeyPem, { mode: 0o600 });
+
+  return { id, kid: cred.kid, keyFile, expiresAt };
 }
 
 function connectionByName(db, name) {
@@ -159,98 +220,151 @@ function cmdRegistry(values, sub) {
   throw new GatewayError('E_USAGE', `unknown registry subcommand: ${sub}`);
 }
 
-function cmdKey(values, sub) {
-  const { db } = ctx(values);
-  if (sub === 'mint') {
+function cmdSvc(values, sub) {
+  const { db, dir } = ctx(values);
+
+  if (sub === 'enroll') {
     const conn = connectionByName(db, requireOpt(values, 'connection'));
-    const plaintext = `dbg_${crypto.randomBytes(24).toString('base64url')}`;
-    const ttl = parseTtl(values.ttl, 30 * 86400);
-    const id = newId('key');
-    db.prepare(
-      `INSERT INTO access_keys (id, connection_id, label, key_hash, key_prefix, scopes, created_at, expires_at)
-       VALUES (?,?,?,?,?,?,?,?)`,
-    ).run(
-      id,
-      conn.id,
-      values.label || 'default',
-      hashAccessKey(plaintext),
-      plaintext.slice(0, 12),
-      JSON.stringify(['read']),
-      nowIso(),
-      new Date(Date.now() + ttl * 1000).toISOString(),
-    );
-    out({ ok: true, id, connection: conn.name, key: plaintext, note: 'shown once — store it in the client host, never in chat' });
+    const label = values.label || `svc-${conn.name}`;
+    const svc = issueServiceCredential(db, {
+      connectionId: conn.id,
+      label,
+      ttl: values.ttl || '90d',
+      delegatedBy: 'cli:local',
+      dir,
+      fileName: `${conn.name}-${label}`.replace(/[^a-z0-9._-]+/gi, '-'),
+    });
+    out({
+      ok: true,
+      svc_id: svc.id,
+      kid: svc.kid,
+      connection: conn.name,
+      key_file: svc.keyFile,
+      expires_at: svc.expiresAt,
+      envelope: { action: 'query.read', max_ttl: 900, daily_quota: 2000 },
+      note: 'private key written to key_file (0600); the gateway stores only the public key',
+    });
     return db.close();
   }
+
   if (sub === 'list') {
     const rows = db
       .prepare(
-        `SELECT k.id, c.name AS connection, k.label, k.key_prefix, k.scopes, k.created_at, k.expires_at, k.revoked_at
-           FROM access_keys k JOIN connections c ON c.id = k.connection_id ORDER BY k.created_at DESC`,
+        `SELECT s.id, c.name AS connection, s.label, s.kid, s.envelope,
+                s.created_at, s.expires_at, s.revoked_at, s.last_minted_at, s.minted_today
+           FROM service_credentials s JOIN connections c ON c.id = s.connection_id
+          ORDER BY s.created_at DESC`,
       )
       .all();
     out(rows);
     return db.close();
   }
+
   if (sub === 'revoke') {
     const id = requireOpt(values, 'id');
-    const info = db.prepare('UPDATE access_keys SET revoked_at = ? WHERE id = ?').run(nowIso(), id);
+    const info = db.prepare('UPDATE service_credentials SET revoked_at = ? WHERE id = ?').run(nowIso(), id);
     out({ ok: Number(info.changes) > 0 });
     return db.close();
   }
-  throw new GatewayError('E_USAGE', `unknown key subcommand: ${sub}`);
+
+  throw new GatewayError('E_USAGE', `unknown svc subcommand: ${sub}`);
 }
 
 function cmdCap(values, sub) {
   const { db, signing } = ctx(values);
+
   if (sub === 'mint') {
-    const plain = requireOpt(values, 'key');
-    const row = db
+    const svcId = requireOpt(values, 'svc');
+    const keyFile = requireOpt(values, 'key-file');
+    const sessionRef = values.session || newId('sess');
+
+    if (!fs.existsSync(keyFile)) {
+      throw new GatewayError('E_SVC_KEY_FILE', `key file not found: ${keyFile}`);
+    }
+    const privateKeyPem = fs.readFileSync(keyFile, 'utf8');
+
+    const svcRow = db
       .prepare(
-        `SELECT k.*, c.name AS connection_name, c.status AS connection_status
-           FROM access_keys k JOIN connections c ON c.id = k.connection_id
-          WHERE k.key_hash = ?`,
+        `SELECT s.id, s.kid, s.connection_id, c.name AS connection_name
+           FROM service_credentials s JOIN connections c ON c.id = s.connection_id
+          WHERE s.id = ?`,
       )
-      .get(hashAccessKey(plain));
-    if (!row) throw new GatewayError('E_KEY_UNKNOWN', 'access key not recognised');
-    if (row.revoked_at) throw new GatewayError('E_KEY_REVOKED', 'access key has been revoked');
-    if (new Date(row.expires_at).getTime() < Date.now()) throw new GatewayError('E_KEY_EXPIRED', 'access key has expired');
-    if (row.connection_status !== 'active') throw new GatewayError('E_CONNECTION_INACTIVE', 'connection is not active');
+      .get(svcId);
+    if (!svcRow) throw new GatewayError('E_SVC_UNKNOWN', 'service credential not recognised');
 
     const ttl = Math.min(parseTtl(values.ttl, 900), 900);
-    const plan = buildRedactionPlan(db, row.connection_id);
+    const request = {
+      svc_id: svcId,
+      kid: svcRow.kid,
+      nonce: newId('n'),
+      ts: Math.floor(Date.now() / 1000),
+      session_ref: sessionRef,
+      resource: `${RESOURCE_PREFIX}${svcRow.connection_name}`,
+      action: 'query.read',
+      ttl,
+    };
+
+    let verified;
+    try {
+      const signature = signMintRequest(privateKeyPem, request);
+      verified = verifyServiceMint({ db, payload: request, signature });
+    } catch (err) {
+      appendAudit(db, {
+        actorType: 'agent',
+        actorId: `svc:${svcId}`,
+        action: 'capability.mint',
+        connectionId: svcRow.connection_id,
+        decision: `deny:${err.code ?? 'mint'}`,
+      });
+      throw err;
+    }
+
+    const plan = buildRedactionPlan(db, svcRow.connection_id);
     const { token, payload } = mintCapability({
       privateKey: signing.privateKey,
       kid: signing.kid,
       ttlSeconds: ttl,
       claims: {
         capId: newId('cap'),
-        subject: `key:${row.id}`,
-        resource: `${RESOURCE_PREFIX}${row.connection_name}`,
+        subject: `svc:${verified.svc.id}`,
+        resource: `${RESOURCE_PREFIX}${verified.connectionName}`,
         action: 'query.read',
         audience: TOOL_NAME,
-        sessionRef: newId('sess'),
-        nonce: newId('n'),
+        sessionRef,
+        nonce: newId('capn'),
         redactionPlan: plan,
         channelProfile: 'network',
       },
     });
+
     appendAudit(db, {
-      actorType: 'admin',
-      actorId: 'cli',
+      actorType: 'agent',
+      actorId: `svc:${verified.svc.id}`,
       action: 'capability.mint',
-      connectionId: row.connection_id,
+      connectionId: svcRow.connection_id,
       decision: 'allow',
       maskedColumns: Object.keys(plan),
     });
-    out({ ok: true, token, exp: payload.exp, ttl, resource: payload.res, audience: payload.aud, planEntries: Object.keys(plan).length });
+
+    out({
+      ok: true,
+      token,
+      exp: payload.exp,
+      ttl,
+      session_ref: sessionRef,
+      resource: payload.res,
+      audience: payload.aud,
+      planEntries: Object.keys(plan).length,
+    });
     return db.close();
   }
+
   if (sub === 'plan') {
     const conn = connectionByName(db, requireOpt(values, 'connection'));
     out(buildRedactionPlan(db, conn.id));
     return db.close();
   }
+
   throw new GatewayError('E_USAGE', `unknown cap subcommand: ${sub}`);
 }
 
@@ -310,8 +424,8 @@ async function main() {
       return cmdConnection(values, sub);
     case 'registry':
       return cmdRegistry(values, sub);
-    case 'key':
-      return cmdKey(values, sub);
+    case 'svc':
+      return cmdSvc(values, sub);
     case 'cap':
       return cmdCap(values, sub);
     case 'query':
@@ -324,7 +438,7 @@ async function main() {
       return cmdStatus(values);
     default:
       process.stderr.write(
-        'usage: agent-tools <init|connection|registry|key|cap|query|audit|jwks|status> [subcommand] [--options]\n',
+        'usage: agent-tools <init|connection|registry|svc|cap|query|audit|jwks|status> [subcommand] [--options]\n',
       );
       process.exitCode = 2;
   }

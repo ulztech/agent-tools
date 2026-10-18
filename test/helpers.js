@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { openDb, ensureTool } from '../src/store.js';
-import { getToolDek, loadMasterKey, loadSigningKey, mintCapability, sealWithDek } from '../src/crypto.js';
+import { generateServiceCredential, getToolDek, loadMasterKey, loadSigningKey, mintCapability, sealWithDek } from '../src/crypto.js';
 import { setRegistryRule } from '../src/masking.js';
 import { projectionOf } from '../src/sqlgate.js';
 import { stubDriver } from '../src/drivers.js';
@@ -126,3 +126,48 @@ export const DEFAULT_REGISTRY = [
   { table: 'employee', column: 'sss_no', strategy: 'hash' },
   { table: 'employee', column: 'bank_account', strategy: 'mask' },
 ];
+
+/**
+ * Insert a service passkey row and return the material a test needs to sign a mint
+ * request. The gateway stores only the public key — same as the CLI path.
+ */
+export function enrollService(s, overrides = {}) {
+  const {
+    connectionId = s.connId,
+    label = 'svc-test',
+    ttlDays = 90,
+    envelope = {},
+    expiresAt = new Date(Date.now() + ttlDays * 86_400_000).toISOString(),
+  } = overrides;
+
+  const cred = generateServiceCredential();
+  const id = newId('svc');
+  const env = {
+    connection_id: connectionId,
+    action: 'query.read',
+    max_ttl: 900,
+    daily_quota: 2000,
+    delegated_by: 'test',
+    ...envelope,
+  };
+
+  s.db
+    .prepare(
+      `INSERT INTO service_credentials
+         (id, connection_id, label, kid, alg, public_key_jwk, envelope, created_at, expires_at)
+       VALUES (?,?,?,?,?,?,?,?,?)`,
+    )
+    .run(
+      id,
+      connectionId,
+      label,
+      cred.kid,
+      'ES256',
+      JSON.stringify(cred.publicKeyJwk),
+      JSON.stringify(env),
+      new Date().toISOString(),
+      expiresAt,
+    );
+
+  return { id, kid: cred.kid, privateKeyPem: cred.privateKeyPem, envelope: env };
+}

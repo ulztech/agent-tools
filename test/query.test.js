@@ -4,7 +4,7 @@ import { runQuery } from '../src/query.js';
 import { buildRedactionPlan } from '../src/masking.js';
 import { verifyAudit } from '../src/store.js';
 import { newId } from '../src/util.js';
-import { CONNECTION, DEFAULT_REGISTRY, PII, mint, setup, smartStub } from './helpers.js';
+import { CONNECTION, DEFAULT_REGISTRY, PII, enrollService, mint, setup, smartStub } from './helpers.js';
 
 function run(s, { sql, token, connectionName = CONNECTION, driverFactory, maxRows }) {
   return runQuery({
@@ -183,23 +183,17 @@ test('query: a star over a derived table still masks (I10 through the real path)
   assert.equal(result.rows[0].x, '[REDACTED]');
 });
 
-test('query: revoking the access key kills capabilities minted before revocation', async () => {
+test('query: revoking the service passkey kills capabilities minted before revocation', async () => {
   const s = setup({ registry: DEFAULT_REGISTRY });
-  const keyId = newId('key');
+  const svc = enrollService(s);
   const now = new Date().toISOString();
-  s.db
-    .prepare(
-      `INSERT INTO access_keys (id, connection_id, label, key_hash, key_prefix, scopes, created_at, expires_at)
-       VALUES (?,?,?,?,?,?,?,?)`,
-    )
-    .run(keyId, s.connId, 'test', `hash-${keyId}`, 'dbg_test', JSON.stringify(['read']), now, new Date(Date.now() + 60_000).toISOString());
 
-  const { token } = mint(s.signing, { claims: { subject: `key:${keyId}` } });
-  s.db.prepare('UPDATE access_keys SET revoked_at = ? WHERE id = ?').run(now, keyId);
+  const { token } = mint(s.signing, { claims: { subject: `svc:${svc.id}` } });
+  s.db.prepare('UPDATE service_credentials SET revoked_at = ? WHERE id = ?').run(now, svc.id);
 
-  await assert.rejects(() => run(s, { sql: 'select employee_id from employee', token }), /E_KEY_REVOKED/);
+  await assert.rejects(() => run(s, { sql: 'select employee_id from employee', token }), /E_SVC_REVOKED/);
   const audit = s.db.prepare('SELECT decision FROM audit_events ORDER BY seq DESC LIMIT 1').get();
-  assert.equal(audit.decision, 'deny:key-revoked');
+  assert.equal(audit.decision, 'deny:svc-revoked');
 });
 
 test('query: eight levels of derived nesting still mask (I10, no hop cap)', async () => {

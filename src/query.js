@@ -73,14 +73,14 @@ export async function runQuery({
     throw err;
   }
 
-  // Instant revocation: a capability minted before its access key was revoked must stop
-  // working immediately, not at `exp`.
+  // Instant revocation: a capability minted before its service passkey was revoked must
+  // stop working immediately, not at `exp`.
   const subject = String(payload.sub || '');
-  if (subject.startsWith('key:')) {
-    const keyRow = db.prepare('SELECT revoked_at FROM access_keys WHERE id = ?').get(subject.slice(4));
-    if (keyRow && keyRow.revoked_at) {
-      appendAudit(db, { ...base, decision: 'deny:key-revoked' });
-      throw new GatewayError('E_KEY_REVOKED', 'the access key behind this capability has been revoked');
+  if (subject.startsWith('svc:')) {
+    const svcRow = db.prepare('SELECT revoked_at FROM service_credentials WHERE id = ?').get(subject.slice(4));
+    if (svcRow && svcRow.revoked_at) {
+      appendAudit(db, { ...base, decision: 'deny:svc-revoked' });
+      throw new GatewayError('E_SVC_REVOKED', 'the service passkey behind this capability has been revoked');
     }
   }
 

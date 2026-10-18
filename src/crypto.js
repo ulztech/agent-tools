@@ -237,11 +237,117 @@ export function purgeExpiredNonces(db, nowSeconds = Math.floor(Date.now() / 1000
 }
 
 /* ------------------------------------------------------------------ */
-/* Access keys (machine credential)                                    */
+/* Service passkeys (agent credential, D28)                            */
 /* ------------------------------------------------------------------ */
 
-export function hashAccessKey(plaintext) {
-  return sha256Hex(plaintext);
+export const SERVICE_KEY_ALG = 'ES256';
+const MINT_SKEW_SECONDS = 60;
+
+/** Generate the agent keypair. The private half is returned once and never stored. */
+export function generateServiceCredential() {
+  const { privateKey, publicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const der = publicKey.export({ type: 'spki', format: 'der' });
+  return {
+    kid: `k${sha256Hex(der).slice(0, 16)}`,
+    publicKeyJwk: publicKey.export({ format: 'jwk' }),
+    privateKeyPem: privateKey.export({ type: 'pkcs8', format: 'pem' }),
+  };
+}
+
+/** Sign the mint request. The key never travels — only this signature does. */
+export function signMintRequest(privateKeyPem, payload) {
+  const key = crypto.createPrivateKey(privateKeyPem);
+  return b64url(
+    crypto.sign('sha256', Buffer.from(canonicalJson(payload)), { key, dsaEncoding: 'ieee-p1363' }),
+  );
+}
+
+/**
+ * Verify a signed mint request against the stored public key and the reads-only envelope.
+ * Enforces: not revoked, not expired, kid match, signature, clock skew, action,
+ * resource identity, TTL ceiling, daily quota, and single-use nonce.
+ */
+export function verifyServiceMint({
+  db,
+  payload,
+  signature,
+  nowSeconds = Math.floor(Date.now() / 1000),
+  skewSeconds = MINT_SKEW_SECONDS,
+}) {
+  if (!payload || typeof payload !== 'object') {
+    throw new GatewayError('E_SVC_REQUEST', 'mint request is missing');
+  }
+  for (const field of ['svc_id', 'kid', 'nonce', 'ts', 'session_ref', 'resource', 'action', 'ttl']) {
+    if (payload[field] === undefined || payload[field] === null) {
+      throw new GatewayError('E_SVC_REQUEST', `mint request is missing ${field}`);
+    }
+  }
+
+  const svc = db
+    .prepare(
+      `SELECT s.*, c.name AS connection_name, c.status AS connection_status
+         FROM service_credentials s JOIN connections c ON c.id = s.connection_id
+        WHERE s.id = ?`,
+    )
+    .get(payload.svc_id);
+  if (!svc) throw new GatewayError('E_SVC_UNKNOWN', 'service credential not recognised');
+  if (svc.revoked_at) throw new GatewayError('E_SVC_REVOKED', 'service credential has been revoked');
+  if (new Date(svc.expires_at).getTime() < Date.now()) {
+    throw new GatewayError('E_SVC_EXPIRED', 'service credential has expired');
+  }
+  if (svc.connection_status !== 'active') {
+    throw new GatewayError('E_CONNECTION_INACTIVE', 'connection is not active');
+  }
+  if (payload.kid !== svc.kid) {
+    throw new GatewayError('E_SVC_KID', 'kid does not match this service credential');
+  }
+
+  const publicKey = crypto.createPublicKey({ key: JSON.parse(svc.public_key_jwk), format: 'jwk' });
+  const valid = crypto.verify(
+    'sha256',
+    Buffer.from(canonicalJson(payload)),
+    { key: publicKey, dsaEncoding: 'ieee-p1363' },
+    fromB64url(String(signature)),
+  );
+  if (!valid) throw new GatewayError('E_SVC_SIGNATURE', 'mint request signature is invalid');
+
+  if (Math.abs(Number(payload.ts) - nowSeconds) > skewSeconds) {
+    throw new GatewayError('E_SVC_CLOCK', 'mint request timestamp is outside the allowed skew');
+  }
+
+  const envelope = JSON.parse(svc.envelope);
+  if (payload.action !== 'query.read' || envelope.action !== 'query.read') {
+    throw new GatewayError('E_SVC_ACTION', 'service credentials may only mint query.read capabilities');
+  }
+  if (payload.resource !== `db:${svc.connection_name}`) {
+    throw new GatewayError('E_SVC_RESOURCE', 'mint request targets another connection');
+  }
+
+  const maxTtl = Math.min(MAX_CAP_TTL, Number(envelope.max_ttl) || MAX_CAP_TTL);
+  if (Number(payload.ttl) > maxTtl) {
+    throw new GatewayError('E_SVC_TTL', `ttl exceeds the envelope ceiling of ${maxTtl}s`);
+  }
+
+  const day = new Date(nowSeconds * 1000).toISOString().slice(0, 10);
+  const minted = svc.quota_day === day ? Number(svc.minted_today) : 0;
+  const quota = Number(envelope.daily_quota) || 0;
+  if (quota > 0 && minted >= quota) {
+    throw new GatewayError('E_SVC_QUOTA', 'daily mint quota exhausted');
+  }
+
+  try {
+    db.prepare(
+      'INSERT INTO service_mint_nonces (nonce, svc_id, expires_at, used_at) VALUES (?,?,?,?)',
+    ).run(payload.nonce, svc.id, nowSeconds + skewSeconds + 300, nowIso());
+  } catch {
+    throw new GatewayError('E_SVC_REPLAY', 'mint request nonce has already been used');
+  }
+
+  db.prepare(
+    'UPDATE service_credentials SET minted_today = ?, quota_day = ?, last_minted_at = ? WHERE id = ?',
+  ).run(minted + 1, day, nowIso(), svc.id);
+
+  return { svc, envelope, connectionName: svc.connection_name };
 }
 
 export function thumbprintOf(obj) {

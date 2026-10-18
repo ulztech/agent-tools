@@ -44,17 +44,27 @@ CREATE TABLE IF NOT EXISTS connection_secrets (
   key_version INTEGER NOT NULL DEFAULT 1
 );
 
-CREATE TABLE IF NOT EXISTS access_keys (
+CREATE TABLE IF NOT EXISTS service_credentials (
   id TEXT PRIMARY KEY,
   connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
   label TEXT NOT NULL,
-  key_hash TEXT NOT NULL UNIQUE,
-  key_prefix TEXT NOT NULL,
-  scopes TEXT NOT NULL,
+  kid TEXT NOT NULL UNIQUE,
+  alg TEXT NOT NULL CHECK (alg = 'ES256'),
+  public_key_jwk TEXT NOT NULL,
+  envelope TEXT NOT NULL,
   created_at TEXT NOT NULL,
   expires_at TEXT NOT NULL,
   revoked_at TEXT,
-  last_used_at TEXT
+  last_minted_at TEXT,
+  minted_today INTEGER NOT NULL DEFAULT 0,
+  quota_day TEXT
+);
+
+CREATE TABLE IF NOT EXISTS service_mint_nonces (
+  nonce TEXT PRIMARY KEY,
+  svc_id TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  used_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS capability_nonces (
