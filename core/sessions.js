@@ -155,6 +155,13 @@ export function revokeAllForUser(db, userId) {
   );
 }
 
+/** Retire every session except the one making the request. */
+export function revokeOtherSessions(db, userId, keepId) {
+  db.prepare(
+    'UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND id != ? AND revoked_at IS NULL',
+  ).run(new Date().toISOString(), userId, keepId);
+}
+
 export function liveSessions(db, now = Date.now()) {
   const iso = new Date(now).toISOString();
   return db

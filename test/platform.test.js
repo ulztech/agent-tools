@@ -526,3 +526,61 @@ test('server: a passkey can be removed, but never the last one', async () => {
     server.close();
   }
 });
+test('server: /auth/verify fails identically for unknown and known accounts', async () => {
+  const { server, base } = await boot();
+  try {
+    const clientDataJSON = Buffer.from(
+      JSON.stringify({ type: 'webauthn.get', challenge: 'not-a-real-challenge', origin: 'http://localhost:8443' }),
+    ).toString('base64url');
+    const response = {
+      id: 'AAAA',
+      rawId: 'AAAA',
+      type: 'public-key',
+      clientExtensionResults: {},
+      response: { clientDataJSON, authenticatorData: 'AAAA', signature: 'AAAA', userHandle: null },
+    };
+    const attempt = async (username) => {
+      const res = await fetch(`${base}/auth/verify`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username, response }),
+      });
+      return { status: res.status, body: await res.json() };
+    };
+
+    const known = await attempt('member1');
+    const unknown = await attempt('nobody-at-all');
+    assert.equal(known.status, 401);
+    assert.equal(unknown.status, 401);
+    assert.deepEqual(known.body, unknown.body);
+  } finally {
+    server.close();
+  }
+});
+
+test('server: removing a passkey retires the user other sessions', async () => {
+  const { server, cookieFor, post, db, ids } = await boot();
+  try {
+    const insert = (id) =>
+      db.prepare(
+        `INSERT INTO webauthn_creds (id, user_id, credential_id, public_key, counter, transports, created_at)
+         VALUES (?,?,?,?,0,'[]',?)`,
+      ).run(id, ids.member1, `cred-${id}`, 'AA', new Date().toISOString());
+    insert('pk1');
+    insert('pk2');
+
+    const current = cookieFor('member1');
+    const elsewhere = cookieFor('member1');
+    markStepUp(db, current.session.id);
+
+    const res = await post('/me/security/passkeys/pk1/remove', {
+      cookie: current.header,
+      form: { _csrf: current.session.csrf_token },
+    });
+    assert.equal(res.status, 303);
+    assert.equal(loadSession(db, elsewhere.session.id), null);
+    assert.ok(loadSession(db, current.session.id));
+  } finally {
+    server.close();
+  }
+});

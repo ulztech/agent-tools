@@ -10,6 +10,7 @@ import {
   loadSession,
   markStepUp,
   revokeAllForUser,
+  revokeOtherSessions,
   rotateSession,
   revokeSession,
   touchSession,
@@ -214,8 +215,16 @@ export function createPlatformServer({ db, masterKey }) {
         setSessionCookie(res, session.id);
         return sendJson(res, 200, { ok: true, next: '/login/totp' });
       } catch (err) {
-        audit(db, { userId: null, event: 'login.passkey', factor: 'passkey', result: 'fail', detail: err.code || err.message });
-        throw err;
+        audit(db, {
+          userId: null,
+          event: 'login.passkey',
+          factor: 'passkey',
+          result: 'fail',
+          detail: err.code || 'unknown',
+        });
+        // Uniform failure: the same status and body whether the account exists, the
+        // challenge is unknown, or the assertion is bad.
+        return sendJson(res, 401, { error: 'Sign-in failed' });
       }
     }
 
@@ -697,6 +706,8 @@ export function createPlatformServer({ db, masterKey }) {
         factor: 'passkey',
         result: Number(info.changes) === 1 ? 'ok' : 'missing',
       });
+      // A retired device must not keep a live session elsewhere.
+      if (Number(info.changes) === 1) revokeOtherSessions(db, session.user_id, session.id);
       return redirect(res, '/me/security');
     }
 
