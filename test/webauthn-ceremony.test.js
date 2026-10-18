@@ -121,3 +121,16 @@ test('webauthn: an unknown username gets a decoy, not an empty allow list', asyn
   const again = await beginAuthentication(db, 'nobody-here');
   assert.equal(unknown.options.allowCredentials[0].id, again.options.allowCredentials[0].id);
 });
+
+test('webauthn: the decoy matches the shape of the deployed credentials', async () => {
+  const { db, user } = fixture();
+  db.prepare(
+    `INSERT INTO webauthn_creds (id, user_id, credential_id, public_key, counter, transports, created_at)
+     VALUES ('x1', ?, 'abcdefghijklmnopqrstuv', 'AA', 0, '["internal","hybrid"]', ?)`,
+  ).run(user.id, new Date().toISOString());
+
+  const { options } = await beginAuthentication(db, 'nobody-here');
+  const decoy = options.allowCredentials[0];
+  assert.equal(decoy.id.length, 22);
+  assert.deepEqual(decoy.transports, ['internal', 'hybrid']);
+});

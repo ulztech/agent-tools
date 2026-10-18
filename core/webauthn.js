@@ -138,11 +138,30 @@ function decoyCredential(db, username) {
     key = crypto.randomBytes(32).toString('base64url');
     db.prepare("INSERT OR IGNORE INTO platform_meta (key, value) VALUES ('decoy_key', ?)").run(key);
   }
-  const id = crypto
+
+  // Match the shape of the credentials actually deployed: a fixed-length, fixed-transport
+  // decoy is distinguishable in any estate where real credentials are homogeneous.
+  const rows = db.prepare('SELECT credential_id, transports FROM webauthn_creds').all();
+  const mode = (values, fallback) => {
+    if (values.length === 0) return fallback;
+    const counts = new Map();
+    for (const value of values) counts.set(value, (counts.get(value) || 0) + 1);
+    return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+  };
+  const length = mode(
+    rows.map((r) => r.credential_id.length),
+    43,
+  );
+  const transports = JSON.parse(mode(rows.map((r) => r.transports || '["internal"]'), '["internal"]'));
+
+  let id = crypto
     .createHmac('sha256', Buffer.from(key, 'base64url'))
     .update(String(username || '').toLowerCase())
     .digest('base64url');
-  return { id, type: 'public-key', transports: ['internal'] };
+  while (id.length < length) {
+    id += crypto.createHmac('sha256', Buffer.from(key, 'base64url')).update(id).digest('base64url');
+  }
+  return { id: id.slice(0, length), type: 'public-key', transports };
 }
 
 export async function beginAuthentication(db, username) {
