@@ -162,13 +162,20 @@ export function maskRows({ rows, fields, sql, registry, salt }) {
         ? Object.keys(rows[0])
         : [];
 
+  // A positional map is only trustworthy if it produces exactly as many columns as the
+  // driver actually returned. USING / NATURAL joins, and anything else that coalesces or
+  // reorders, shows up here as a count mismatch — and a mismatch means redact everything.
+  const hasPositional = Array.isArray(analysis.byPosition) && analysis.byPosition.length > 0;
+  const positionalMatches = hasPositional && analysis.byPosition.length === keys.length;
+  const forceRedact = Boolean(analysis.positionalUnknown) || (hasPositional && !positionalMatches);
+
   const rulesFor = (columnName, index) => {
     const found = [];
     const seen = new Set();
 
-    // Positions are unknowable for this shape (a `*` mixed with other items, or a nested
-    // `*`). Redact everything rather than guess — masking more never blocks a result.
-    if (analysis.positionalUnknown) {
+    // Positions are unknowable for this shape. Redact everything rather than guess —
+    // masking more never blocks a result.
+    if (forceRedact) {
       return [{ table: null, column: columnName, strategy: 'redact', params: null, matchedBy: 'lineage' }];
     }
 

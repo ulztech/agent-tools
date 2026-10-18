@@ -277,6 +277,48 @@ test('masking: union of stars fails safe', () => {
   assert.equal(out.rows[0].dept, REDACTED);
 });
 
+test('masking: USING join coalesces a column, so the count mismatch forces redaction', () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const out = maskRows({
+    rows: [{ employee_id: 'emp-1', email: PII.email, 'upper(email)': 'JUAN@EXAMPLE.COM' }],
+    fields: ['employee_id', 'email', 'upper(email)'],
+    sql: 'select * from (select employee_id, email from employee) a join (select employee_id, upper(email) from t2) b using (employee_id)',
+    registry: registryOf(s),
+    salt: 'salt',
+  });
+  for (const key of ['employee_id', 'email', 'upper(email)']) {
+    assert.equal(out.rows[0][key], REDACTED, `${key} must be redacted on a count mismatch`);
+  }
+});
+
+test('masking: NATURAL join forces redaction', () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const out = maskRows({
+    rows: [{ employee_id: 'emp-1', email: PII.email, 'upper(sss_no)': '12-3456789-0' }],
+    fields: ['employee_id', 'email', 'upper(sss_no)'],
+    sql: 'select * from (select employee_id, email from employee) a natural join (select employee_id, upper(sss_no) from t2) b',
+    registry: registryOf(s),
+    salt: 'salt',
+  });
+  for (const key of ['employee_id', 'email', 'upper(sss_no)']) {
+    assert.equal(out.rows[0][key], REDACTED, `${key} must be redacted on a NATURAL join`);
+  }
+});
+
+test('masking: an explicit ON join whose count matches keeps positions aligned', () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const out = maskRows({
+    rows: [{ employee_id: 'emp-1', email: PII.email, employee_id_2: 'emp-1', u: 'JUAN@EXAMPLE.COM' }],
+    fields: ['employee_id', 'email', 'employee_id_2', 'u'],
+    sql: 'select * from (select employee_id, email from employee) a join (select employee_id as employee_id_2, upper(email) as u from t2) b on a.employee_id = b.employee_id_2',
+    registry: registryOf(s),
+    salt: 'salt',
+  });
+  assert.equal(out.rows[0].employee_id, 'emp-1');
+  assert.equal(out.rows[0].email, REDACTED);
+  assert.equal(out.rows[0].u, REDACTED);
+});
+
 test('masking: a derived-table alias cannot launder a masked column', () => {
   const s = setup({ registry: DEFAULT_REGISTRY });
   const out = maskRows({

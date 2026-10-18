@@ -348,7 +348,7 @@ export function analyzeProjection(sql) {
   const branches = top.map((s) => s.items);
   const star = top.some((s) => s.items.some((i) => i.star));
 
-  const maxLen = branches.reduce((m, b) => Math.max(m, b.length), 0);
+  const maxLen = branches.reduce((m, b) => Math.max(m, b.filter((i) => !i.star).length), 0);
   const byPosition = [];
   for (let i = 0; i < maxLen; i += 1) {
     const set = new Set();
@@ -404,13 +404,18 @@ export function analyzeProjection(sql) {
     const anyStarInside = immediate.some((s) => s.items.some((i) => i.star));
     const singlePureStar =
       immediate.length === 1 && immediate[0].items.length === 1 && immediate[0].items[0].star && !nested;
+    // USING / NATURAL coalesce the shared column, so the real result has fewer columns
+    // than the parsed select lists. Never positional-map across those.
+    const coalescing = tokens.some(
+      (t, i) => depths[i] === 0 && t.type === 'word' && ['using', 'natural'].includes(t.value.toLowerCase()),
+    );
     const complex = selects.length > 1 || hasUnion || sourceKinds.length > 1;
 
     if (complex) {
       if (singlePureStar) {
         // `select * from (select * from employee) t` — the inner star resolves to real
         // base-table column names, so the name fallback is exact.
-      } else if (!hasUnion && allDerived && !anyStarInside && !nested) {
+      } else if (!hasUnion && !coalescing && allDerived && !anyStarInside && !nested) {
         byPosition.length = 0;
         for (const s of immediate) {
           for (const item of s.items) byPosition.push(expand(item.sources || []));
