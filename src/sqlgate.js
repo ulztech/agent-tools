@@ -348,7 +348,10 @@ export function analyzeProjection(sql) {
   const branches = top.map((s) => s.items);
   const star = top.some((s) => s.items.some((i) => i.star));
 
-  const maxLen = branches.reduce((m, b) => Math.max(m, b.filter((i) => !i.star).length), 0);
+  const hasStarInBranches = branches.some((b) => b.some((i) => i.star));
+  const maxLen = hasStarInBranches
+    ? 0
+    : branches.reduce((m, b) => Math.max(m, b.filter((i) => !i.star).length), 0);
   const byPosition = [];
   for (let i = 0; i < maxLen; i += 1) {
     const set = new Set();
@@ -382,14 +385,21 @@ export function analyzeProjection(sql) {
   // column. Over-masking never blocks a result; under-masking breaks the only promise.
   let positionalUnknown = false;
   if (star) {
-    const immediate = selects.filter((s) => s.depth === 1);
     const nested = selects.some((s) => s.depth >= 2);
     const hasUnion = tokens.some(
       (t) => t.type === 'word' && ['union', 'intersect', 'except'].includes(t.value.toLowerCase()),
     );
+    // USING / NATURAL coalesce the shared column, so the real result has fewer columns
+    // than the parsed select lists. Never positional-map across those.
+    const coalescing = tokens.some(
+      (t, i) => depths[i] === 0 && t.type === 'word' && ['using', 'natural'].includes(t.value.toLowerCase()),
+    );
 
-    // How many sources are joined, and is each one a derived select or a base table?
+    // Identify the derived selects that are actually FROM / JOIN sources, in source order.
+    // A scalar subquery in the select list is also depth 1, but it is not a source and
+    // must not contribute a position.
     const sourceKinds = [];
+    const sourceOpenIdx = [];
     for (let i = 0; i < tokens.length; i += 1) {
       if (depths[i] !== 0) continue;
       const t = tokens[i];
@@ -397,27 +407,43 @@ export function analyzeProjection(sql) {
       const w = t.value.toLowerCase();
       if (w !== 'from' && w !== 'join' && w !== 'straight_join') continue;
       const next = tokens[i + 1];
-      sourceKinds.push(next && next.type === 'punct' && next.value === '(' ? 'derived' : 'base');
+      if (next && next.type === 'punct' && next.value === '(') {
+        sourceKinds.push('derived');
+        sourceOpenIdx.push(i + 1);
+      } else {
+        sourceKinds.push('base');
+      }
     }
-
+    const sourceSelects = sourceOpenIdx
+      .map((openIdx) => selects.find((s) => s.idx === openIdx + 1))
+      .filter(Boolean);
+    const derivedSources = sourceKinds.filter((k) => k === 'derived').length;
     const allDerived = sourceKinds.length > 0 && sourceKinds.every((k) => k === 'derived');
-    const anyStarInside = immediate.some((s) => s.items.some((i) => i.star));
-    const singlePureStar =
-      immediate.length === 1 && immediate[0].items.length === 1 && immediate[0].items[0].star && !nested;
-    // USING / NATURAL coalesce the shared column, so the real result has fewer columns
-    // than the parsed select lists. Never positional-map across those.
-    const coalescing = tokens.some(
-      (t, i) => depths[i] === 0 && t.type === 'word' && ['using', 'natural'].includes(t.value.toLowerCase()),
+
+    const anyStarInside = sourceSelects.some((s) => s.items.some((i) => i.star));
+    // A CTE can expose an expression under a name the driver will not reproduce, so a
+    // pure star is only trustworthy when no CTE is in play.
+    const hasCte = tokens.some(
+      (t, i) => depths[i] === 0 && t.type === 'word' && t.value.toLowerCase() === 'with',
     );
+    const singlePureStar =
+      !hasCte &&
+      sourceSelects.length === 1 &&
+      sourceSelects[0].items.length === 1 &&
+      sourceSelects[0].items[0].star &&
+      !nested;
     const complex = selects.length > 1 || hasUnion || sourceKinds.length > 1;
 
     if (complex) {
-      if (singlePureStar) {
+      if (sourceSelects.length !== derivedSources) {
+        // Could not match every derived source to its select — never guess.
+        positionalUnknown = true;
+      } else if (singlePureStar) {
         // `select * from (select * from employee) t` — the inner star resolves to real
         // base-table column names, so the name fallback is exact.
-      } else if (!hasUnion && !coalescing && allDerived && !anyStarInside && !nested) {
+      } else if (!hasUnion && !coalescing && !anyStarInside && !nested && allDerived) {
         byPosition.length = 0;
-        for (const s of immediate) {
+        for (const s of sourceSelects) {
           for (const item of s.items) byPosition.push(expand(item.sources || []));
         }
       } else {

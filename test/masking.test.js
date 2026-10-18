@@ -319,6 +319,31 @@ test('masking: an explicit ON join whose count matches keeps positions aligned',
   assert.equal(out.rows[0].u, REDACTED);
 });
 
+test('masking: a select-list subquery cannot steal position 0 from a star', () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const out = maskRows({
+    rows: [{ employee_id: 'emp-1', 'upper(email)': 'JUAN@EXAMPLE.COM', k: 'emp-1' }],
+    fields: ['employee_id', 'upper(email)', 'k'],
+    sql: 'select *, (select employee_id from t2) as k from (select employee_id, upper(email) from employee) d',
+    registry: registryOf(s),
+    salt: 'salt',
+  });
+  assert.equal(out.rows[0]['upper(email)'], REDACTED);
+});
+
+test('masking: star plus a constant stays precise for the non-PII column', () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const out = maskRows({
+    rows: [{ employee_id: 'emp-1', email: PII.email, one: 1 }],
+    fields: ['employee_id', 'email', 'one'],
+    sql: 'select *, 1 as one from employee',
+    registry: registryOf(s),
+    salt: 'salt',
+  });
+  assert.equal(out.rows[0].employee_id, 'emp-1');
+  assert.equal(out.rows[0].email, REDACTED);
+});
+
 test('masking: a derived-table alias cannot launder a masked column', () => {
   const s = setup({ registry: DEFAULT_REGISTRY });
   const out = maskRows({
