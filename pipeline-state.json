@@ -37,9 +37,11 @@
     { "gate": "verifier_gate", "agent": "verifier.agent", "status": "fail", "ts": "2026-10-18T14:52:00Z", "note": "FAIL: CLI sealed without AAD while query opened with it (data path unreachable end-to-end); star-over-derived laundering; colliding derived outputs; no capability revocation; missing integration test file; I12 not implemented" },
     { "gate": "verifier_gate", "agent": "orchestrator", "status": "pass", "ts": "2026-10-18T15:12:00Z", "note": "Fixed: CLI AAD, star/table.* over derived, derived-map union, key-revocation check in the data path, integration test file, cli-seal regression test, I12 disclosed. 110/110 + independent probe 5/5" },
     { "gate": "verifier_gate", "agent": "verifier.agent", "status": "fail", "ts": "2026-10-18T15:30:00Z", "note": "FAIL: lineage walk had a hardcoded hop cap of 6, so nesting depth >=6 left synthetic aliases unresolved and returned the value unmasked (fail-open). All six prior findings confirmed fixed." },
-    { "gate": "verifier_gate", "agent": "orchestrator", "status": "pass", "ts": "2026-10-18T15:42:00Z", "note": "Hop cap removed from both walkers — the derived graph is finite and cycle-safe via the visited set. Independent probe: depth 5/6/7/10/20/40, star-over-depth-8, CTE depth-7 all masked. 114/114 tests." }
+    { "gate": "verifier_gate", "agent": "orchestrator", "status": "pass", "ts": "2026-10-18T15:42:00Z", "note": "Hop cap removed from both walkers — the derived graph is finite and cycle-safe via the visited set. Independent probe: depth 5/6/7/10/20/40, star-over-depth-8, CTE depth-7 all masked. 114/114 tests." },
+    { "gate": "verifier_gate", "agent": "verifier.agent", "status": "fail", "ts": "2026-10-18T16:02:00Z", "note": "FAIL: separate pre-existing fail-open — star over a derived table containing an UNALIASED expression (e.g. concat(first_name,last_name)); the driver's column name is the expression text, so name/derived lookup missed. Depth fix and termination argument both confirmed sound." },
+    { "gate": "verifier_gate", "agent": "orchestrator", "status": "pass", "ts": "2026-10-18T16:14:00Z", "note": "Star columns now map BY POSITION to the immediate derived select's items, so expression column names are irrelevant. Non-PII columns in the same derived table stay readable; multiple derived sources over-mask rather than leak. 117/117 tests + independent probe 5/5." }
   ],
-  "handoff_token": "pagenttools-tok-0003",
+  "handoff_token": "pagenttools-tok-0004",
   "created_at": "2026-10-18T13:14:00Z",
-  "updated_at": "2026-10-18T15:42:00Z"
+  "updated_at": "2026-10-18T16:14:00Z"
 }

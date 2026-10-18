@@ -219,6 +219,21 @@ test('query: eight levels of derived nesting still mask (I10, no hop cap)', asyn
   assert.equal(result.rows[0].a1, '[REDACTED]');
 });
 
+test('query: star over a derived unaliased expression masks (verifier finding)', async () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const { token } = mint(s.signing);
+  const field = 'concat(first_name,last_name)';
+  const result = await run(s, {
+    sql: `select * from (select ${field} from employee) t`,
+    token,
+    driverFactory: () => ({
+      query: async () => ({ fields: [field], rows: [{ [field]: `${PII.first}DelaCruz` }] }),
+      close: async () => {},
+    }),
+  });
+  assert.equal(result.rows[0][field], '[REDACTED]');
+});
+
 test('query: no PII value is present anywhere in the audit trail', async () => {
   const s = setup({ registry: DEFAULT_REGISTRY });
   const { token } = mint(s.signing);

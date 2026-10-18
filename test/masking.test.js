@@ -154,6 +154,31 @@ test('masking: a self-referential alias terminates and masks', () => {
   assert.equal(out.rows[0].x, REDACTED);
 });
 
+test('masking: star over a derived table with an unaliased expression still masks', () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const out = maskRows({
+    rows: [{ 'concat(first_name,last_name)': 'JuanDelaCruz' }],
+    fields: ['concat(first_name,last_name)'],
+    sql: 'select * from (select concat(first_name,last_name) from employee) t',
+    registry: registryOf(s),
+    salt: 'salt',
+  });
+  assert.equal(out.rows[0]['concat(first_name,last_name)'], REDACTED);
+});
+
+test('masking: star over a derived table masks only the PII columns by position', () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const out = maskRows({
+    rows: [{ employee_id: 'emp-1', email: PII.email }],
+    fields: ['employee_id', 'email'],
+    sql: 'select * from (select employee_id, email from employee) t',
+    registry: registryOf(s),
+    salt: 'salt',
+  });
+  assert.equal(out.rows[0].employee_id, 'emp-1');
+  assert.equal(out.rows[0].email, REDACTED);
+});
+
 test('masking: a derived-table alias cannot launder a masked column', () => {
   const s = setup({ registry: DEFAULT_REGISTRY });
   const out = maskRows({
