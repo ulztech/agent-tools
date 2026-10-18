@@ -214,9 +214,58 @@
       "status": "pass",
       "ts": "2026-10-19T01:10:00Z",
       "note": "PASS WITH CONDITIONS then PASS: 207/207; enumeration oracle closed via stable shape-matched decoy; real WebAuthn ceremony suite; 4 review rounds total. Residual: hardware authenticator/browser/Docker/second host unverified"
+    },
+    {
+      "gate": "implementation",
+      "agent": "orchestrator",
+      "status": "pass",
+      "ts": "2026-10-19T02:30:00Z",
+      "note": "C3: HMAC-keyed audit chain (HKDF from master key); console inventory (connections, service passkeys, masking registry, signing kid/JWKS); self-service TOTP rotation and recovery regeneration; /me/activity; forward-auth split listener; deploy (Dockerfile, 4 networks, Caddy TLS + route-ordered header handling, nftables, runbook)"
+    },
+    {
+      "gate": "review_gate",
+      "agent": "reviewer.agent",
+      "status": "fail",
+      "ts": "2026-10-19T02:50:00Z",
+      "note": "NO-GO x6: chain keyed only in server (init wrote unkeyed), cookie host-scope vs subdomain, --authz-port missing from OPTIONS, nftables denied its own auth path, /data root-owned, inventory opened read-write"
+    },
+    {
+      "gate": "security_gate",
+      "agent": "security-gate.agent",
+      "status": "fail",
+      "ts": "2026-10-19T02:50:00Z",
+      "note": "BLOCKED: compose mounted the whole gateway data dir incl. master.key and signing private key; console bound 0.0.0.0 on authz-net"
+    },
+    {
+      "gate": "review_gate",
+      "agent": "orchestrator",
+      "status": "pass",
+      "ts": "2026-10-19T04:10:00Z",
+      "note": "all six closed; live stack: TLS 200, login 200, anon app 401, forged X-AT-* replaced, platform publishes no port, only gateway.sqlite + signing.pub.pem mounted"
+    },
+    {
+      "gate": "verifier_gate",
+      "agent": "verifier.agent",
+      "status": "fail",
+      "ts": "2026-10-19T04:30:00Z",
+      "note": "FAIL: Caddy handshake (auto_https off), header strip ordered after forward_auth, no TLS console origin, dir mount, WAL+ro inventory"
+    },
+    {
+      "gate": "verifier_gate",
+      "agent": "verifier.agent",
+      "status": "fail",
+      "ts": "2026-10-19T05:00:00Z",
+      "note": "FAIL: inventory fallback wrapped only the open; first query fails on EROFS WAL"
+    },
+    {
+      "gate": "verifier_gate",
+      "agent": "verifier.agent",
+      "status": "pass",
+      "ts": "2026-10-19T05:20:00Z",
+      "note": "PASS: 216/216; read-only mount now returns connections/tools/credentials; 40 concurrent renders, zero temp residue; 300MB refused in 2ms; TLS 1.3, header replacement, no platform port, no secrets mounted"
     }
   ],
   "handoff_token": "pagenttools-tok-0005",
   "created_at": "2026-10-18T13:14:00Z",
-  "updated_at": "2026-10-19T01:10:00Z"
+  "updated_at": "2026-10-19T05:20:00Z"
 }

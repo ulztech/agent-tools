@@ -436,6 +436,12 @@ async function main() {
       return cmdJwks(values);
     case 'status':
       return cmdStatus(values);
+    case 'checkpoint': {
+      const { db } = ctx(values);
+      db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+      out({ ok: true, note: 'WAL checkpointed; the console inventory now sees every committed row' });
+      return db.close();
+    }
     default:
       process.stderr.write(
         'usage: agent-tools <init|connection|registry|svc|cap|query|audit|jwks|status> [subcommand] [--options]\n',

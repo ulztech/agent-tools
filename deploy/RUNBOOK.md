@@ -105,6 +105,16 @@ no published port; Caddy is the only path in, and strips inbound `X-AT-*` before
 its own. Signing a human in does **not** authorize the agents inside it — those still need
 service passkeys against the gateway.
 
+## 7b. Console freshness
+
+The console reads a snapshot of gateway.sqlite and cannot see rows still sitting in the
+gateway's -wal file. Normally the lag is seconds. Before relying on the inventory during
+an incident, checkpoint:
+
+``bash
+node --experimental-sqlite src/cli.js checkpoint --data <gateway data dir>
+``
+
 ## 8. Drills (record the result in the audit log)
 
 | Drill | Command | Pass |
