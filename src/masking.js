@@ -176,8 +176,32 @@ export function maskRows({ rows, fields, sql, registry, salt }) {
       }
     };
 
+    // Transitive lookup through derived tables / CTEs. This is what catches
+    // `select * from (select first_name as x from employee) t`, where the outer star
+    // produces an output called `x` that appears nowhere in the registry.
+    const expandDerived = (start) => {
+      const out = new Set();
+      const queue = [...start];
+      let hops = 0;
+      while (queue.length && hops < 6) {
+        const next = [];
+        for (const raw of queue) {
+          const key = String(raw).toLowerCase();
+          if (out.has(key)) continue;
+          out.add(key);
+          const inner = analysis.derived?.get(key);
+          if (inner) next.push(...inner);
+        }
+        queue.length = 0;
+        queue.push(...next);
+        hops += 1;
+      }
+      return out;
+    };
+
     collect(analysis.byOutput?.get(String(columnName).toLowerCase()), 'lineage');
     if (found.length === 0) collect(analysis.byPosition?.[index], 'lineage');
+    if (found.length === 0) collect(expandDerived([columnName]), 'lineage');
     if (found.length === 0) collect([columnName], 'name');
     return found;
   };

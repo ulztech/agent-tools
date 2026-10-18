@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { runQuery } from '../src/query.js';
 import { buildRedactionPlan } from '../src/masking.js';
 import { verifyAudit } from '../src/store.js';
+import { newId } from '../src/util.js';
 import { CONNECTION, DEFAULT_REGISTRY, PII, mint, setup, smartStub } from './helpers.js';
 
 function run(s, { sql, token, connectionName = CONNECTION, driverFactory, maxRows }) {
@@ -165,6 +166,40 @@ test('query: an unmapped personal-data column returns rows and writes a detector
 
   const audit = s.db.prepare('SELECT decision FROM audit_events ORDER BY seq DESC LIMIT 1').get();
   assert.equal(audit.decision, 'allow');
+});
+
+test('query: a star over a derived table still masks (I10 through the real path)', async () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const { token } = mint(s.signing);
+  const result = await run(s, {
+    sql: 'select * from (select first_name as x from employee) t',
+    token,
+    driverFactory: () => ({
+      query: async () => ({ fields: ['x'], rows: [{ x: PII.first }] }),
+      close: async () => {},
+    }),
+  });
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.rows[0].x, '[REDACTED]');
+});
+
+test('query: revoking the access key kills capabilities minted before revocation', async () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const keyId = newId('key');
+  const now = new Date().toISOString();
+  s.db
+    .prepare(
+      `INSERT INTO access_keys (id, connection_id, label, key_hash, key_prefix, scopes, created_at, expires_at)
+       VALUES (?,?,?,?,?,?,?,?)`,
+    )
+    .run(keyId, s.connId, 'test', `hash-${keyId}`, 'dbg_test', JSON.stringify(['read']), now, new Date(Date.now() + 60_000).toISOString());
+
+  const { token } = mint(s.signing, { claims: { subject: `key:${keyId}` } });
+  s.db.prepare('UPDATE access_keys SET revoked_at = ? WHERE id = ?').run(now, keyId);
+
+  await assert.rejects(() => run(s, { sql: 'select employee_id from employee', token }), /E_KEY_REVOKED/);
+  const audit = s.db.prepare('SELECT decision FROM audit_events ORDER BY seq DESC LIMIT 1').get();
+  assert.equal(audit.decision, 'deny:key-revoked');
 });
 
 test('query: no PII value is present anywhere in the audit trail', async () => {

@@ -73,6 +73,17 @@ export async function runQuery({
     throw err;
   }
 
+  // Instant revocation: a capability minted before its access key was revoked must stop
+  // working immediately, not at `exp`.
+  const subject = String(payload.sub || '');
+  if (subject.startsWith('key:')) {
+    const keyRow = db.prepare('SELECT revoked_at FROM access_keys WHERE id = ?').get(subject.slice(4));
+    if (keyRow && keyRow.revoked_at) {
+      appendAudit(db, { ...base, decision: 'deny:key-revoked' });
+      throw new GatewayError('E_KEY_REVOKED', 'the access key behind this capability has been revoked');
+    }
+  }
+
   if (!connection) {
     appendAudit(db, { ...base, decision: 'deny:unknown-connection' });
     throw new GatewayError('E_UNKNOWN_CONNECTION', `unknown connection: ${connectionName}`);

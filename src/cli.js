@@ -95,7 +95,7 @@ function cmdConnection(values, sub) {
        VALUES (?,?,?,?,?,?,?,'active',?)`,
     ).run(id, name, values.engine || 'mysql', secret.host, secret.port, secret.database, tool.id, nowIso());
     const dek = getToolDek(db, masterKey, tool.id);
-    const sealed = sealWithDek(dek, JSON.stringify(secret));
+    const sealed = sealWithDek(dek, JSON.stringify(secret), id);
     db.prepare(
       'INSERT INTO connection_secrets (connection_id, iv, tag, ct, key_version) VALUES (?,?,?,?,1)',
     ).run(id, sealed.iv, sealed.tag, sealed.ct);

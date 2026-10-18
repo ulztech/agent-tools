@@ -316,12 +316,17 @@ export function analyzeProjection(sql) {
   }
 
   // Any select nested one or more levels deep contributes an output -> sources mapping.
+  // Values are unioned, not overwritten: two derived tables may expose the same output
+  // name, and taking the last one would erase the other's lineage.
   const derived = new Map();
   for (const s of selects) {
     if (s.depth === 0) continue;
     for (const item of s.items) {
       if (!item.out || item.star) continue;
-      derived.set(String(item.out).toLowerCase(), item.sources || []);
+      const key = String(item.out).toLowerCase();
+      const set = derived.get(key) || new Set();
+      for (const src of item.sources || []) set.add(String(src).toLowerCase());
+      derived.set(key, set);
     }
   }
 

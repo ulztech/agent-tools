@@ -50,6 +50,7 @@ In particular, deliberately out of scope for v1:
 | Blocking or denying a result | Product decision — the gateway always returns a row set for an authorised read |
 | Denying aggregates over masked columns | `COUNT(*) WHERE name='X'` and `AVG(salary)` remain a re-identification path |
 | Masking unmapped columns | The registry is the control; the detector only writes an audit flag |
+| Masked database views (I12) | Not implemented in this slice. App-layer masking is the only enforcement today; a gateway bypass would reach raw columns |
 | Audit tail truncation | The hash chain detects modification of any existing record; deleting the newest rows can only be caught by the external WORM anchor planned for a later phase |
 | `write` / `export` | No write scope and no export channel in v1 |
 | PostgreSQL / SQL Server | MySQL/MariaDB only in v1 |

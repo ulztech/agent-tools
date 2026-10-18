@@ -88,6 +88,30 @@ test('masking: unresolvable SQL still masks by name — it never blocks', () => 
   assert.equal(out.rows[0].email, REDACTED);
 });
 
+test('masking: a star over a derived table cannot launder a masked column', () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const out = maskRows({
+    rows: [{ x: PII.first }],
+    fields: ['x'],
+    sql: 'select * from (select first_name as x from employee) t',
+    registry: registryOf(s),
+    salt: 'salt',
+  });
+  assert.equal(out.rows[0].x, REDACTED);
+});
+
+test('masking: two derived tables exposing the same output name do not erase each other', () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const out = maskRows({
+    rows: [{ x: PII.first }],
+    fields: ['x'],
+    sql: "select x from (select first_name as x from employee) a, (select 1 as x from employee) b",
+    registry: registryOf(s),
+    salt: 'salt',
+  });
+  assert.equal(out.rows[0].x, REDACTED);
+});
+
 test('masking: a derived-table alias cannot launder a masked column', () => {
   const s = setup({ registry: DEFAULT_REGISTRY });
   const out = maskRows({
