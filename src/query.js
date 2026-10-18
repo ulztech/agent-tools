@@ -12,7 +12,7 @@ export function readConnectionSecret(db, masterKey, connection) {
   const row = db.prepare('SELECT * FROM connection_secrets WHERE connection_id = ?').get(connection.id);
   if (!row) throw new GatewayError('E_NO_SECRET', 'connection has no stored secret');
   const dek = getToolDek(db, masterKey, connection.tool_id);
-  const json = openWithDek(dek, row).toString('utf8');
+  const json = openWithDek(dek, row, connection.id).toString('utf8');
   return JSON.parse(json);
 }
 
@@ -41,7 +41,11 @@ export async function runQuery({
   if (typeof sql !== 'string' || sql.trim() === '') {
     throw new GatewayError('E_SQL_EMPTY', 'sql is empty');
   }
-  const limit = Math.min(Number(maxRows) || DEFAULT_MAX_ROWS, HARD_MAX_ROWS);
+  const requested = Number(maxRows);
+  const limit =
+    Number.isFinite(requested) && requested > 0
+      ? Math.min(Math.floor(requested), HARD_MAX_ROWS)
+      : DEFAULT_MAX_ROWS;
   const connection = db.prepare('SELECT * FROM connections WHERE name = ?').get(connectionName);
   const base = {
     actorType: 'agent',
@@ -100,7 +104,7 @@ export async function runQuery({
     result = await driver.query({ sql, params, maxRows: limit });
   } catch (err) {
     appendAudit(db, { ...base, decision: 'error:driver' });
-    throw new GatewayError('E_DRIVER', 'query failed', { cause: String(err && err.message) });
+    throw new GatewayError('E_DRIVER', 'query failed');
   } finally {
     if (driver && typeof driver.close === 'function') await driver.close().catch(() => {});
   }
@@ -135,7 +139,18 @@ export async function runQuery({
     decision: 'allow',
   });
   for (const flag of flagged) {
-    recordDetectorFlag(db, { ...flag, auditSeq: seq, connectionId: connection.id, tableName: null });
+    try {
+      recordDetectorFlag(db, {
+        columnName: flag.column,
+        detector: flag.detector,
+        reason: flag.reason,
+        auditSeq: seq,
+        connectionId: connection.id,
+        tableName: null,
+      });
+    } catch {
+      // A detector write must never turn an authorised read into an error (D18).
+    }
   }
 
   return {

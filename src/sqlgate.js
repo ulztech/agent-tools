@@ -1,15 +1,17 @@
 import { GatewayError } from './util.js';
 
 const MAX_SQL_LENGTH = 20_000;
+const MAX_NESTED_LINEAGE = 6;
 
 const ALLOWED_FIRST = new Set(['select', 'with', 'explain', 'describe', 'desc', 'show']);
+const SHOW_ALLOW = new Set(['tables', 'columns', 'index', 'indexes', 'create', 'full']);
 
 const DENY_WORDS = new Set([
   'insert', 'update', 'delete', 'drop', 'alter', 'create', 'truncate',
   'rename', 'grant', 'revoke', 'call', 'do', 'handler', 'lock', 'unlock',
   'prepare', 'execute', 'deallocate', 'set', 'into', 'outfile', 'dumpfile',
   'load_file', 'sleep', 'benchmark', 'get_lock', 'release_lock',
-  'information_schema', 'performance_schema', 'mysql',
+  'information_schema', 'performance_schema', 'mysql', 'sys',
 ]);
 
 const PROJECTION_KEYWORDS = new Set([
@@ -148,6 +150,10 @@ function depthWalk(tokens, fn) {
 /**
  * Read-only gate. Refusing a write is not "blocking a result" — there is no result to
  * block when the statement is not a read.
+ *
+ * Deny words are matched on BOTH bare words and backticked identifiers: MySQL parses
+ * `` `load_file`('/etc/passwd') `` and `` `mysql`.`user` `` exactly like the unquoted
+ * form, so skipping identifiers would leave the gate open.
  */
 export function assertReadOnly(sql) {
   const tokens = tokenize(sql);
@@ -157,9 +163,8 @@ export function assertReadOnly(sql) {
   depthWalk(tokens, (t, idx) => {
     if (t.type === 'punct' && t.value === ';') {
       const rest = tokens.slice(idx + 1);
-      if (rest.length > 0) statements += 1;
-      if (rest.length === 0) statements += 1;
       if (rest.length > 0) throw new GatewayError('E_SQL_MULTI', 'multiple statements are not allowed');
+      statements += 1;
     }
   });
   if (statements > 1) throw new GatewayError('E_SQL_MULTI', 'multiple statements are not allowed');
@@ -173,71 +178,76 @@ export function assertReadOnly(sql) {
 
   for (const t of tokens) {
     if (t.type === 'var') throw new GatewayError('E_SQL_VAR', 'user variables are not allowed');
-    if (t.type !== 'word') continue;
+  }
+
+  // SHOW is allow-listed to schema introspection only (SHOW PROCESSLIST / VARIABLES leak),
+  // and is exempt from the deny words so `SHOW CREATE TABLE` stays usable.
+  if (head === 'show') {
+    const after = tokens.slice(tokens.indexOf(first) + 1).filter((t) => t.type === 'word' || t.type === 'ident');
+    const ok = after.slice(0, 3).some((t) => SHOW_ALLOW.has(t.value.toLowerCase()));
+    if (!ok) throw new GatewayError('E_SQL_NOT_READ_ONLY', 'only schema-introspection SHOW statements are allowed');
+    return tokens;
+  }
+
+  for (const t of tokens) {
+    if (t.type !== 'word' && t.type !== 'ident') continue;
     const w = t.value.toLowerCase();
-    if (DENY_WORDS.has(w)) {
-      throw new GatewayError('E_SQL_NOT_READ_ONLY', `disallowed keyword: ${w}`);
-    }
+    if (DENY_WORDS.has(w)) throw new GatewayError('E_SQL_NOT_READ_ONLY', `disallowed keyword: ${w}`);
   }
 
   return tokens;
 }
 
-/**
- * Extract the select list and, for each output column, the source columns it reads.
- * This is what lets an aliased or wrapped PII column still be masked:
- *   SELECT CONCAT(first_name,' ',last_name) AS full  ->  full <- [first_name, last_name]
- */
-export function projectionOf(sql) {
-  const tokens = tokenize(sql);
-  let depth = 0;
-  let selectIdx = -1;
-  let fromIdx = -1;
-  for (let idx = 0; idx < tokens.length; idx += 1) {
-    const t = tokens[idx];
-    if (t.type === 'punct' && t.value === '(') depth += 1;
-    else if (t.type === 'punct' && t.value === ')') depth -= 1;
-    else if (depth === 0 && t.type === 'word') {
-      const w = t.value.toLowerCase();
-      if (w === 'select' && selectIdx === -1) selectIdx = idx;
-      else if (w === 'from' && selectIdx !== -1) {
-        fromIdx = idx;
-        break;
-      }
+/* ------------------------------------------------------------------ */
+/* Projection / lineage                                                */
+/* ------------------------------------------------------------------ */
+
+function depthsOf(tokens) {
+  const depths = [];
+  let d = 0;
+  for (const t of tokens) {
+    if (t.type === 'punct' && t.value === ')') d -= 1;
+    depths.push(d);
+    if (t.type === 'punct' && t.value === '(') d += 1;
+  }
+  return depths;
+}
+
+function parseItems(tokens, depths, selectIdx) {
+  const d = depths[selectIdx];
+  let end = tokens.length;
+  for (let i = selectIdx + 1; i < tokens.length; i += 1) {
+    if (depths[i] < d) {
+      end = i;
+      break;
+    }
+    if (depths[i] === d && tokens[i].type === 'word' && tokens[i].value.toLowerCase() === 'from') {
+      end = i;
+      break;
     }
   }
-  if (selectIdx === -1) return { items: [], star: false };
-  const end = fromIdx === -1 ? tokens.length : fromIdx;
   const list = tokens.slice(selectIdx + 1, end);
+  const listDepths = depths.slice(selectIdx + 1, end);
 
   const items = [];
   let current = [];
-  let d = 0;
-  const flush = () => {
-    if (current.length === 0) return;
-    items.push(describeItem(current));
-    current = [];
-  };
-  for (const t of list) {
-    if (t.type === 'punct' && t.value === '(') d += 1;
-    if (t.type === 'punct' && t.value === ')') d -= 1;
-    if (d === 0 && t.type === 'punct' && t.value === ',') {
-      flush();
+  for (let i = 0; i < list.length; i += 1) {
+    const t = list[i];
+    if (listDepths[i] === d && t.type === 'punct' && t.value === ',') {
+      if (current.length) items.push(describeItem(current));
+      current = [];
       continue;
     }
     current.push(t);
   }
-  flush();
-
-  const star = items.some((it) => it.star);
-  return { items: items.filter((it) => !it.star), star };
+  if (current.length) items.push(describeItem(current));
+  return items;
 }
 
 function describeItem(tokens) {
   if (tokens.length === 1 && tokens[0].type === 'punct' && tokens[0].value === '*') {
     return { out: '*', sources: [], star: true };
   }
-  // table.* shorthand
   if (
     tokens.length === 3 &&
     (tokens[0].type === 'word' || tokens[0].type === 'ident') &&
@@ -283,4 +293,90 @@ function describeItem(tokens) {
   const lastIdent = [...expr].reverse().find((t) => t.type === 'word' || t.type === 'ident');
   const out = alias || (lastIdent ? lastIdent.value : null);
   return { out, sources, star: false };
+}
+
+/**
+ * Full projection analysis.
+ *
+ * Lineage is resolved through derived tables, CTEs and UNION branches. Without that,
+ * `select x from (select first_name as x from employee) t` would launder a masked column
+ * through one pair of parentheses — a registry column reaching the agent unmasked.
+ *
+ * `byOutput` and `byPosition` therefore contain the *transitively expanded* source set.
+ */
+export function analyzeProjection(sql) {
+  const tokens = tokenize(sql);
+  const depths = depthsOf(tokens);
+
+  const selects = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    if (tokens[i].type === 'word' && tokens[i].value.toLowerCase() === 'select') {
+      selects.push({ idx: i, depth: depths[i], items: parseItems(tokens, depths, i) });
+    }
+  }
+
+  // Any select nested one or more levels deep contributes an output -> sources mapping.
+  const derived = new Map();
+  for (const s of selects) {
+    if (s.depth === 0) continue;
+    for (const item of s.items) {
+      if (!item.out || item.star) continue;
+      derived.set(String(item.out).toLowerCase(), item.sources || []);
+    }
+  }
+
+  const expand = (names) => {
+    const out = new Set();
+    const queue = [...(names || [])];
+    let hops = 0;
+    while (queue.length && hops < MAX_NESTED_LINEAGE) {
+      const next = [];
+      for (const raw of queue) {
+        const n = String(raw).toLowerCase();
+        if (out.has(n)) continue;
+        out.add(n);
+        const inner = derived.get(n);
+        if (inner) next.push(...inner);
+      }
+      queue.length = 0;
+      queue.push(...next);
+      hops += 1;
+    }
+    return out;
+  };
+
+  const top = selects.filter((s) => s.depth === 0);
+  const branches = top.map((s) => s.items);
+  const star = top.some((s) => s.items.some((i) => i.star));
+
+  const maxLen = branches.reduce((m, b) => Math.max(m, b.length), 0);
+  const byPosition = [];
+  for (let i = 0; i < maxLen; i += 1) {
+    const set = new Set();
+    for (const branch of branches) {
+      const item = branch[i];
+      if (!item || item.star) continue;
+      for (const name of expand(item.sources)) set.add(name);
+    }
+    byPosition.push(set);
+  }
+
+  const byOutput = new Map();
+  for (const branch of branches) {
+    for (const item of branch) {
+      if (!item.out || item.star) continue;
+      const key = String(item.out).toLowerCase();
+      const set = byOutput.get(key) || new Set();
+      for (const name of expand([...(item.sources || []), key])) set.add(name);
+      byOutput.set(key, set);
+    }
+  }
+
+  return { tokens, star, branches, byOutput, byPosition, derived };
+}
+
+/** Backwards-compatible view: the first top-level select list. */
+export function projectionOf(sql) {
+  const analysis = analyzeProjection(sql);
+  return { items: analysis.branches[0] || [], star: analysis.star };
 }

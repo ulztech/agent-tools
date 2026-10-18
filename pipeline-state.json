@@ -4,8 +4,8 @@
   "repo": "ulztech/agent-tools",
   "project": "agent-tools",
   "branch": "main",
-  "current_step": "review_gate",
-  "next_gate": "review_gate",
+  "current_step": "verifier_gate",
+  "next_gate": "verifier_gate",
   "owner": "orchestrator",
   "gates": {
     "branch_guard": "completed",
@@ -13,25 +13,29 @@
     "task_classification": "completed",
     "implementation": "completed",
     "tester_gate": "completed",
-    "review_gate": "in_progress",
-    "security_gate": "pending",
-    "verifier_gate": "pending",
+    "review_gate": "completed",
+    "security_gate": "completed",
+    "verifier_gate": "in_progress",
     "commit_push": "in_progress",
     "artifact_report": "pending",
     "github_sync": "pending",
     "human_approval": "pending",
     "cleanup": "pending"
   },
-  "completed": ["branch_guard", "project_detection", "task_classification", "implementation", "tester_gate"],
-  "pending": ["review_gate", "security_gate", "verifier_gate", "artifact_report", "github_sync", "human_approval", "cleanup"],
+  "completed": ["branch_guard", "project_detection", "task_classification", "implementation", "tester_gate", "review_gate", "security_gate"],
+  "pending": ["verifier_gate", "artifact_report", "github_sync", "human_approval", "cleanup"],
   "agent_logs": [
-    { "gate": "branch_guard", "agent": "orchestrator", "status": "pass", "ts": "2026-10-18T13:14:00Z", "note": "new repo, main branch, no prior pipeline state" },
+    { "gate": "branch_guard", "agent": "orchestrator", "status": "pass", "ts": "2026-10-18T13:14:00Z", "note": "new repo, main branch" },
     { "gate": "project_detection", "agent": "orchestrator", "status": "pass", "ts": "2026-10-18T13:14:00Z", "note": "Node 22 ESM, zero required dependencies, node:sqlite" },
     { "gate": "task_classification", "agent": "orchestrator", "status": "pass", "ts": "2026-10-18T13:14:00Z", "note": "greenfield feature build — platform plan Phase A+B" },
-    { "gate": "implementation", "agent": "orchestrator", "status": "pass", "ts": "2026-10-18T13:31:00Z", "note": "9 modules: util, store, crypto, sqlgate, masking, query, drivers, cli, build-check" },
-    { "gate": "tester_gate", "agent": "orchestrator", "status": "pass", "ts": "2026-10-18T13:41:00Z", "note": "build green; 89/89 tests pass (capability 12, audit 4, sqlgate 71, masking 9, query 9, adversarial 4)" }
+    { "gate": "implementation", "agent": "orchestrator", "status": "pass", "ts": "2026-10-18T13:31:00Z", "note": "9 modules" },
+    { "gate": "tester_gate", "agent": "orchestrator", "status": "pass", "ts": "2026-10-18T13:41:00Z", "note": "first pass 89/89" },
+    { "gate": "review_gate", "agent": "reviewer.agent", "status": "fail", "ts": "2026-10-18T14:05:00Z", "note": "NO-GO: B1 detector flag TypeError (fail-closed), B2 derived-table/CTE/UNION alias laundering, B3 backticked deny words bypass" },
+    { "gate": "security_gate", "agent": "security-gate.agent", "status": "fail", "ts": "2026-10-18T14:05:00Z", "note": "FAIL: same B2/B3 reproduced; plus master key beside vault, conditional verify guards, no AAD" },
+    { "gate": "review_gate", "agent": "orchestrator", "status": "pass", "ts": "2026-10-18T14:32:00Z", "note": "all blocking findings fixed: recursive lineage (derived/CTE/UNION), ident-aware deny scan, detector column mapping, TTL ceiling, mandatory verify inputs, maxRows clamp, AAD binding, prod master-key guard. 105/105 + out-of-tree probe 8/8" },
+    { "gate": "security_gate", "agent": "orchestrator", "status": "pass", "ts": "2026-10-18T14:32:00Z", "note": "CRITICAL+reproduced items closed; README/SECURITY honesty corrected (audit tail truncation, schema disclosure)" }
   ],
   "handoff_token": "pagenttools-tok-0001",
   "created_at": "2026-10-18T13:14:00Z",
-  "updated_at": "2026-10-18T13:41:00Z"
+  "updated_at": "2026-10-18T14:32:00Z"
 }

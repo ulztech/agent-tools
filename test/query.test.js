@@ -129,6 +129,44 @@ test('query: the chain stays valid across grants, denials and errors', async () 
   assert.equal(check.checked, 3);
 });
 
+test('query: a negative max rows falls back to the default cap rather than removing it', async () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const { token } = mint(s.signing);
+  const result = await run(s, {
+    sql: 'select employee_id from employee',
+    token,
+    maxRows: -1,
+    driverFactory: () => smartStub('select employee_id from employee', { rows: 200 }),
+  });
+  assert.equal(result.rows.length, 100);
+});
+
+test('query: an unmapped personal-data column returns rows and writes a detector flag', async () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const { token } = mint(s.signing);
+  const result = await run(s, {
+    sql: 'select contact_email_2 from employee',
+    token,
+    driverFactory: () => ({
+      query: async () => ({
+        fields: ['contact_email_2'],
+        rows: [{ contact_email_2: 'someone@example.com' }],
+      }),
+      close: async () => {},
+    }),
+  });
+
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.rows[0].contact_email_2, 'someone@example.com');
+
+  const flags = s.db.prepare('SELECT * FROM detector_flags').all();
+  assert.equal(flags.length, 1);
+  assert.equal(flags[0].column_name, 'contact_email_2');
+
+  const audit = s.db.prepare('SELECT decision FROM audit_events ORDER BY seq DESC LIMIT 1').get();
+  assert.equal(audit.decision, 'allow');
+});
+
 test('query: no PII value is present anywhere in the audit trail', async () => {
   const s = setup({ registry: DEFAULT_REGISTRY });
   const { token } = mint(s.signing);

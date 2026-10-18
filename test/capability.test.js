@@ -92,3 +92,17 @@ test('capability: malformed tokens are rejected', () => {
   assert.throws(() => verify(s, 'not-a-token'), /E_CAP_MALFORMED/);
   assert.throws(() => verify(s, 'a.b'), /E_CAP_MALFORMED/);
 });
+
+test('capability: a TTL above the 900s ceiling is rejected by the verifier', () => {
+  const s = setup();
+  const { token } = mint(s.signing, { ttl: 86_400 });
+  assert.throws(() => verify(s, token), /E_CAP_TTL/);
+});
+
+test('capability: verification refuses to run without all three policy inputs', () => {
+  const s = setup();
+  const { token } = mint(s.signing);
+  assert.throws(() => verify(s, token, { expectedAudience: undefined }), /E_CAP_POLICY/);
+  assert.throws(() => verify(s, token, { expectedResource: undefined }), /E_CAP_POLICY/);
+  assert.throws(() => verify(s, token, { action: undefined }), /E_CAP_POLICY/);
+});

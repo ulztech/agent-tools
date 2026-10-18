@@ -88,6 +88,42 @@ test('masking: unresolvable SQL still masks by name — it never blocks', () => 
   assert.equal(out.rows[0].email, REDACTED);
 });
 
+test('masking: a derived-table alias cannot launder a masked column', () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const out = maskRows({
+    rows: [{ x: PII.first }],
+    fields: ['x'],
+    sql: 'select x from (select first_name as x from employee) t',
+    registry: registryOf(s),
+    salt: 'salt',
+  });
+  assert.equal(out.rows[0].x, REDACTED);
+});
+
+test('masking: a CTE alias cannot launder a masked column', () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const out = maskRows({
+    rows: [{ x: PII.first }],
+    fields: ['x'],
+    sql: 'with t as (select first_name as x from employee) select x from t',
+    registry: registryOf(s),
+    salt: 'salt',
+  });
+  assert.equal(out.rows[0].x, REDACTED);
+});
+
+test('masking: a UNION branch cannot launder a masked column', () => {
+  const s = setup({ registry: DEFAULT_REGISTRY });
+  const out = maskRows({
+    rows: [{ n: PII.first }],
+    fields: ['n'],
+    sql: 'select 1 as n from employee union select first_name from employee',
+    registry: registryOf(s),
+    salt: 'salt',
+  });
+  assert.equal(out.rows[0].n, REDACTED);
+});
+
 test('masking: an unmapped personal-data column is flagged but not masked', () => {
   const s = setup({ registry: DEFAULT_REGISTRY });
   const out = maskRows({

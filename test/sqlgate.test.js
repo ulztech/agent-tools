@@ -12,6 +12,8 @@ const ALLOWED = [
   'explain select email from employee',
   'describe employee',
   'show tables',
+  'show columns from employee',
+  'show create table employee',
   'select count(*) from employee',
 ];
 
@@ -48,6 +50,14 @@ const DENIED = [
   ["select email from employee where 1=1 union select email from employee into outfile '/tmp/y'", /E_SQL_NOT_READ_ONLY/],
   ['select 1;;', /E_SQL_MULTI/],
   ['', /E_SQL_EMPTY/],
+  // backticked identifiers must be denied exactly like bare words
+  ["select `load_file`('/etc/passwd')", /E_SQL_NOT_READ_ONLY/],
+  ['select * from `mysql`.`user`', /E_SQL_NOT_READ_ONLY/],
+  ['select `Password` from `mysql`.`user`', /E_SQL_NOT_READ_ONLY/],
+  ['select `sleep`(1)', /E_SQL_NOT_READ_ONLY/],
+  ['select * from `information_schema`.`columns`', /E_SQL_NOT_READ_ONLY/],
+  ['show processlist', /E_SQL_NOT_READ_ONLY/],
+  ['show variables', /E_SQL_NOT_READ_ONLY/],
 ];
 
 for (const sql of ALLOWED) {

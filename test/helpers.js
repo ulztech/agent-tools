@@ -38,6 +38,7 @@ export function setup({ registry = [] } = {}) {
   const sealed = sealWithDek(
     dek,
     JSON.stringify({ host: '127.0.0.1', port: 3306, user: 'u', password: 'p', database: 'fixture' }),
+    connId,
   );
   db.prepare('INSERT INTO connection_secrets (connection_id, iv, tag, ct, key_version) VALUES (?,?,?,?,1)').run(
     connId,

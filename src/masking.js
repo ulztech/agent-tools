@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { GatewayError, newId, nowIso } from './util.js';
-import { projectionOf } from './sqlgate.js';
+import { analyzeProjection } from './sqlgate.js';
 
 export const STRATEGIES = Object.freeze(['redact', 'mask', 'hash', 'null']);
 export const REDACTED = '[REDACTED]';
@@ -61,7 +61,12 @@ export function loadRegistryIndex(db, connectionId) {
   const byColumn = new Map();
   for (const r of rows) {
     const key = String(r.column_name).toLowerCase();
-    const entry = { table: r.table_name, column: r.column_name, strategy: r.strategy, params: r.params ? JSON.parse(r.params) : null };
+    const entry = {
+      table: r.table_name,
+      column: r.column_name,
+      strategy: r.strategy,
+      params: r.params ? JSON.parse(r.params) : null,
+    };
     if (!byColumn.has(key)) byColumn.set(key, []);
     byColumn.get(key).push(entry);
   }
@@ -94,10 +99,7 @@ function maskEmail(value) {
 function maskGeneric(value) {
   const s = String(value);
   const digits = s.replace(/\D/g, '');
-  if (digits.length >= 7) {
-    const tail = s.slice(-2);
-    return `***${tail}`;
-  }
+  if (digits.length >= 7) return `***${s.slice(-2)}`;
   if (s.includes('@')) return maskEmail(s);
   if (s.length <= 1) return '***';
   return `${s[0]}***`;
@@ -129,75 +131,74 @@ export function applyStrategy(strategy, value, { salt, params } = {}) {
 /* Result shaping                                                      */
 /* ------------------------------------------------------------------ */
 
+const STRICTNESS = { redact: 0, null: 1, hash: 2, mask: 3 };
+
 /**
- * Mask a result set. Never throws to signal "cannot mask" — an unresolvable source falls
- * back to matching by column name (D16), and an unmapped column is returned as-is with a
- * detector flag. No query is denied here.
+ * Mask a result set.
+ *
+ * Never throws to signal "cannot mask". Resolution order per output column:
+ *   1. lineage from the parsed statement, expanded through derived tables / CTEs / UNION
+ *   2. column position in the select list
+ *   3. the output column's own name
+ *
+ * No query is denied here (D18), and an unmapped personal-data column is returned as-is
+ * with a detector flag (D16 / AR-8).
  */
 export function maskRows({ rows, fields, sql, registry, salt }) {
   const maskedColumns = [];
   const flagged = [];
-  const nameSet = new Set((fields || []).map((f) => String(f).toLowerCase()));
 
-  let projection = { items: [], star: false };
+  let analysis;
   try {
-    projection = projectionOf(sql);
+    analysis = analyzeProjection(sql);
   } catch {
-    projection = { items: [], star: true };
+    analysis = { star: true, byOutput: new Map(), byPosition: [], branches: [] };
   }
 
-  // output name -> source columns, from the parsed select list
-  const sourceByOutput = new Map();
-  for (const item of projection.items) {
-    if (item.out) sourceByOutput.set(String(item.out).toLowerCase(), item.sources || []);
-  }
+  const keys =
+    Array.isArray(fields) && fields.length > 0
+      ? fields
+      : rows.length > 0
+        ? Object.keys(rows[0])
+        : [];
 
-  const rulesFor = (columnName, sources) => {
-    const out = [];
+  const rulesFor = (columnName, index) => {
+    const found = [];
     const seen = new Set();
-    for (const src of sources || []) {
-      const key = String(src).toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const rules = registry.byColumn.get(key);
-      if (rules) for (const r of rules) out.push({ ...r, matchedBy: 'lineage' });
-    }
-    if (out.length === 0) {
-      const direct = registry.byColumn.get(String(columnName).toLowerCase());
-      if (direct) for (const r of direct) out.push({ ...r, matchedBy: 'name' });
-    }
-    if (out.length === 0 && projection.items.length > 0 && !sourceByOutput.has(String(columnName).toLowerCase())) {
-      // single un-aliased projection whose output name differs from the field name
-      const only = projection.items.length === 1 ? projection.items[0] : null;
-      if (only) {
-        for (const src of only.sources || []) {
-          const rules = registry.byColumn.get(String(src).toLowerCase());
-          if (rules) for (const r of rules) out.push({ ...r, matchedBy: 'lineage' });
-        }
+
+    const collect = (names, matchedBy) => {
+      for (const raw of names || []) {
+        const key = String(raw).toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const rules = registry.byColumn.get(key);
+        if (rules) for (const r of rules) found.push({ ...r, matchedBy });
       }
-    }
-    return out;
+    };
+
+    collect(analysis.byOutput?.get(String(columnName).toLowerCase()), 'lineage');
+    if (found.length === 0) collect(analysis.byPosition?.[index], 'lineage');
+    if (found.length === 0) collect([columnName], 'name');
+    return found;
   };
 
   const masked = rows.map((row) => {
     const next = { ...row };
-    for (const key of Object.keys(next)) {
-      const sources = sourceByOutput.get(key.toLowerCase()) || [];
-      const rules = rulesFor(key, sources);
-      if (rules.length === 0) continue;
-      // If a column maps to several rules, the strictest wins (redact > null > hash > mask).
-      const order = { redact: 0, null: 1, hash: 2, mask: 3 };
-      const rule = rules.sort((a, b) => order[a.strategy] - order[b.strategy])[0];
+    keys.forEach((key, index) => {
+      if (!(key in next)) return;
+      const rules = rulesFor(key, index);
+      if (rules.length === 0) return;
+      const rule = [...rules].sort((a, b) => STRICTNESS[a.strategy] - STRICTNESS[b.strategy])[0];
       next[key] = applyStrategy(rule.strategy, next[key], { salt, params: rule.params });
-      const record = { column: key, strategy: rule.strategy, matchedBy: rule.matchedBy };
-      if (!maskedColumns.some((m) => m.column === key)) maskedColumns.push(record);
-    }
+      if (!maskedColumns.some((m) => m.column === key)) {
+        maskedColumns.push({ column: key, strategy: rule.strategy, matchedBy: rule.matchedBy });
+      }
+    });
     return next;
   });
 
   // Detector: audit-only. Never masks, never blocks.
-  const detector = detectPii({ fields: [...nameSet], rows });
-  for (const f of detector) {
+  for (const f of detectPii({ fields: keys, rows })) {
     if (!maskedColumns.some((m) => m.column.toLowerCase() === f.column.toLowerCase())) flagged.push(f);
   }
 

@@ -6,6 +6,7 @@ import { GatewayError, b64url, canonicalJson, fromB64url, nowIso, sha256Hex } fr
 const ISSUER = 'agent-tools';
 const CAP_TYPE = 'atk-cap';
 const ALG = 'ES256';
+export const MAX_CAP_TTL = 900;
 
 /* ------------------------------------------------------------------ */
 /* Master key + per-tool DEK                                           */
@@ -23,6 +24,12 @@ export function loadMasterKey(dir) {
     if (buf.length !== 32) throw new GatewayError('E_MASTER_KEY', 'AGENT_TOOLS_MASTER_KEY must decode to 32 bytes');
     return buf;
   }
+  if (process.env.NODE_ENV === 'production') {
+    throw new GatewayError(
+      'E_MASTER_KEY',
+      'AGENT_TOOLS_MASTER_KEY is required in production — the master key must not live beside the vault',
+    );
+  }
   const file = path.join(dir, 'master.key');
   if (fs.existsSync(file)) return Buffer.from(fs.readFileSync(file, 'utf8').trim(), 'base64');
   const buf = crypto.randomBytes(32);
@@ -30,15 +37,17 @@ export function loadMasterKey(dir) {
   return buf;
 }
 
-function seal(key, plaintext) {
+function seal(key, plaintext, aad) {
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  if (aad) cipher.setAAD(Buffer.from(String(aad)));
   const ct = Buffer.concat([cipher.update(Buffer.from(plaintext)), cipher.final()]);
   return { iv: b64url(iv), tag: b64url(cipher.getAuthTag()), ct: b64url(ct) };
 }
 
-function open(key, sealed) {
+function open(key, sealed, aad) {
   const decipher = crypto.createDecipheriv('aes-256-gcm', key, fromB64url(sealed.iv));
+  if (aad) decipher.setAAD(Buffer.from(String(aad)));
   decipher.setAuthTag(fromB64url(sealed.tag));
   return Buffer.concat([decipher.update(fromB64url(sealed.ct)), decipher.final()]);
 }
@@ -58,12 +67,12 @@ export function getToolDek(db, masterKey, toolId) {
   return dek;
 }
 
-export function sealWithDek(dek, plaintext) {
-  return seal(dek, plaintext);
+export function sealWithDek(dek, plaintext, aad) {
+  return seal(dek, plaintext, aad);
 }
 
-export function openWithDek(dek, sealed) {
-  return open(dek, sealed);
+export function openWithDek(dek, sealed, aad) {
+  return open(dek, sealed, aad);
 }
 
 /* ------------------------------------------------------------------ */
@@ -160,6 +169,9 @@ export function verifyCapability({
   skewSeconds = 60,
 }) {
   if (typeof token !== 'string') throw new GatewayError('E_CAP_MALFORMED', 'capability must be a string');
+  if (!expectedAudience || !expectedResource || !action) {
+    throw new GatewayError('E_CAP_POLICY', 'audience, resource and action are all required to verify a capability');
+  }
   const parts = token.split('.');
   if (parts.length !== 3) throw new GatewayError('E_CAP_MALFORMED', 'capability is not a compact JWS');
 
@@ -191,14 +203,17 @@ export function verifyCapability({
   }
   if (nowSeconds > payload.exp + skewSeconds) throw new GatewayError('E_CAP_EXPIRED', 'capability has expired');
   if (payload.iat > nowSeconds + skewSeconds) throw new GatewayError('E_CAP_NOT_YET', 'capability is not yet valid');
+  if (payload.exp - payload.iat > MAX_CAP_TTL + skewSeconds) {
+    throw new GatewayError('E_CAP_TTL', `capability ttl exceeds ${MAX_CAP_TTL}s`);
+  }
 
-  if (expectedAudience && payload.aud !== expectedAudience) {
+  if (payload.aud !== expectedAudience) {
     throw new GatewayError('E_CAP_AUDIENCE', `capability audience mismatch: ${payload.aud}`);
   }
-  if (expectedResource && payload.res !== expectedResource) {
+  if (payload.res !== expectedResource) {
     throw new GatewayError('E_CAP_RESOURCE', `capability resource mismatch: ${payload.res}`);
   }
-  if (action && payload.act !== action) {
+  if (payload.act !== action) {
     throw new GatewayError('E_CAP_ACTION', `capability action mismatch: ${payload.act}`);
   }
 

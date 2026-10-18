@@ -30,6 +30,11 @@ vulnerabilities under this policy:
 - **Registry completeness.** A personal-data column that is not in the registry is
   returned to the agent. The detector writes an audit flag; it does not mask and does
   not block.
+- **Audit tail truncation.** Records are hash-chained, so altering or reordering an
+  existing record is detectable. Deleting the newest records is not detectable without
+  the external WORM anchor planned for a later phase.
+- **Schema disclosure.** `SHOW CREATE TABLE` / `DESCRIBE` are permitted, so table DDL is
+  visible to an agent. Schema is intentionally exposed as an MCP resource.
 - **Unmapped databases.** Only MySQL/MariaDB is supported in v1.
 
 ## Handling

@@ -1,7 +1,7 @@
 # Agent-tools
 
 Agent-facing gateways behind **one** control plane: single login, one credential vault,
-one policy engine, one tamper-evident audit trail, one admin console.
+one policy engine, one hash-chained audit trail, one admin console.
 
 **Feature 1 — Database Gateway.** The only path AI agents use to reach SQL databases.
 Agents send a read-only query; the gateway checks a short-lived capability, runs the
@@ -50,6 +50,7 @@ In particular, deliberately out of scope for v1:
 | Blocking or denying a result | Product decision — the gateway always returns a row set for an authorised read |
 | Denying aggregates over masked columns | `COUNT(*) WHERE name='X'` and `AVG(salary)` remain a re-identification path |
 | Masking unmapped columns | The registry is the control; the detector only writes an audit flag |
+| Audit tail truncation | The hash chain detects modification of any existing record; deleting the newest rows can only be caught by the external WORM anchor planned for a later phase |
 | `write` / `export` | No write scope and no export channel in v1 |
 | PostgreSQL / SQL Server | MySQL/MariaDB only in v1 |
 
