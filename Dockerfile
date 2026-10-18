@@ -7,6 +7,8 @@ RUN npm ci --omit=dev && npm cache clean --force
 
 COPY core ./core
 
+RUN mkdir -p /data && chown -R node:node /data /app
+
 ENV NODE_ENV=production
 USER node
 

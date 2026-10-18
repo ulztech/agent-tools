@@ -27,8 +27,10 @@ export function readInventory(dir = gatewayDataDir()) {
   const file = path.join(dir, 'gateway.sqlite');
   if (!fs.existsSync(file)) return { ...empty, reason: 'gateway store not found' };
 
-  const db = new DatabaseSync(file);
+  let db;
   try {
+    db = new DatabaseSync(file, { readOnly: true });
+    db.exec('PRAGMA busy_timeout = 500;');
     return {
       available: true,
       dir,
@@ -56,7 +58,7 @@ export function readInventory(dir = gatewayDataDir()) {
   } catch (err) {
     return { ...empty, reason: err.message };
   } finally {
-    db.close();
+    if (db) db.close();
   }
 }
 

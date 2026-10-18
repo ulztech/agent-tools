@@ -1,5 +1,7 @@
+import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { appendEvent } from './chain.js';
+import { appendEvent, configureChainKey } from './chain.js';
+import { loadMasterKey } from './secretbox.js';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -132,7 +134,14 @@ export function openPlatformDb(dir = dataDir()) {
   db.exec('PRAGMA journal_mode = WAL;');
   db.exec('PRAGMA foreign_keys = ON;');
   db.exec(SCHEMA);
-  return { db, dir };
+
+  // The chain key lives with the database connection, not with the server: init and
+  // invite write audit rows before any HTTP server exists.
+  const masterKey = loadMasterKey(dir);
+  configureChainKey(
+    Buffer.from(crypto.hkdfSync('sha256', masterKey, Buffer.from('agent-tools'), Buffer.from('audit-chain'), 32)),
+  );
+  return { db, dir, masterKey };
 }
 
 export const nowIso = () => new Date().toISOString();

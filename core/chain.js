@@ -18,9 +18,8 @@ export function sha256Hex(input) {
 }
 
 function mac(input) {
-  return chainKey
-    ? crypto.createHmac('sha256', chainKey).update(input).digest('hex')
-    : sha256Hex(input);
+  if (!chainKey) throw new Error('audit chain key is not configured');
+  return crypto.createHmac('sha256', chainKey).update(input).digest('hex');
 }
 
 export function canonicalJson(value) {
@@ -67,6 +66,9 @@ export function appendEvent(db, event) {
 
 export function verifyChain(db) {
   const rows = db.prepare('SELECT * FROM auth_events ORDER BY seq ASC').all();
+  if (rows.length > 0 && !chainKey) {
+    return { ok: false, brokenAt: null, checked: rows.length, reason: 'no-chain-key' };
+  }
   let prev = GENESIS;
   for (const row of rows) {
     if (row.prev_hash !== prev) return { ok: false, brokenAt: row.seq, checked: rows.length };

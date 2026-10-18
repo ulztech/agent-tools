@@ -16,6 +16,8 @@ const OPTIONS = {
   ttl: { type: 'string' },
   port: { type: 'string' },
   host: { type: 'string' },
+  'authz-port': { type: 'string' },
+  'authz-host': { type: 'string' },
 };
 
 function out(value) {

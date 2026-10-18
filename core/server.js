@@ -29,7 +29,7 @@ import { open as openSealed, seal } from './secretbox.js';
 import { consumeCode, generateRecoveryCodes, remainingCodes, storeCodes } from './recovery.js';
 import { clearFailures, isLocked, recordFailure } from './throttle.js';
 import { issueInvite, consumeInvite, inviteByToken, pendingInvites } from './invites.js';
-import { verifyChain, configureChainKey } from './chain.js';
+import { verifyChain } from './chain.js';
 import { probeUpstream, readInventory, readSigningKey } from './inventory.js';
 import { authzDecision } from './authz.js';
 import {
@@ -114,12 +114,6 @@ function sameToken(a, b) {
 export function createPlatformServer({ db, masterKey }) {
   const rp = rpConfig();
   seedDurablePi(db);
-
-  // Key the audit chain from the host master key: a forger now needs the key, not just
-  // write access to the database.
-  configureChainKey(
-    Buffer.from(crypto.hkdfSync('sha256', masterKey, Buffer.from('agent-tools'), Buffer.from('audit-chain'), 32)),
-  );
 
   const sessionOf = (req) => {
     const cookies = parseCookies(req.headers.cookie);
@@ -723,6 +717,8 @@ export function createPlatformServer({ db, masterKey }) {
         'UPDATE users SET totp_secret = ?, totp_confirmed_at = NULL, totp_last_step = 0 WHERE id = ?',
       ).run(seal(masterKey, secret, session.user_id), session.user_id);
       audit(db, { userId: session.user_id, event: 'totp.rotate', factor: 'totp', result: 'ok' });
+      // Other L2 sessions no longer correspond to a confirmed factor.
+      revokeOtherSessions(db, session.user_id, session.id);
       return redirect(res, '/enroll/totp');
     }
 

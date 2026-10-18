@@ -11,6 +11,9 @@ export const sha256 = (value) => crypto.createHash('sha256').update(String(value
 export function issueInvite(db, { username, role, displayName, createdBy = 'cli', ttlMinutes = 60 }) {
   const name = String(username || '').trim().toLowerCase();
   if (!name) throw new Error('username is required');
+  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name)) {
+    throw new Error('username must be 1-64 chars: a-z, 0-9, dot, underscore, hyphen');
+  }
   const existing = db.prepare('SELECT * FROM users WHERE username = ?').get(name);
   if (existing && existing.status === 'active') throw new Error(`user is already active: ${name}`);
 

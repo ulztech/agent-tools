@@ -56,8 +56,10 @@ ss -ltnp | grep 8443                    # -> 127.0.0.1 only
 # 2. cp-net has no gateway.
 docker network inspect agent-tools_cp-net -f '{{.Internal}}'   # -> true
 
-# 3. From the edge network, the control plane is unreachable.
+# 3. From the edge network, the control plane is unreachable (DNS + routing).
 docker run --rm --network agent-tools_edge-net curlimages/curl -m3 -sS http://platform:8443/healthz || echo BLOCKED
+#    and the authz listener is reachable only from authz-net:
+docker run --rm --network agent-tools_authz-net curlimages/curl -m3 -sS http://platform:8444/authz || echo '401 expected'
 
 # 4. The nftables deny is loaded.
 sudo nft list chain inet agenttools forward

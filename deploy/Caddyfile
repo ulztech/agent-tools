@@ -3,27 +3,28 @@
 	auto_https off
 }
 
-https://durable.agent-tools.internal {
+# Applications live on the console's host, under /apps/<name>.
+#
+# Why not a subdomain: `__Host-at_session` is host-bound, so a cookie set for
+# console.agent-tools.internal is never sent to durable.agent-tools.internal and
+# forward_auth would always 401. Keeping the same host (different port is irrelevant to
+# cookies) makes forward_auth work without a Domain cookie that every subdomain could read.
+https://console.agent-tools.internal {
 	tls internal
 
-	# Strip any client-supplied identity header BEFORE forward_auth adds its own.
-	# Without this, a client can forge X-AT-User — the classic forward-auth mistake.
-	request_header -X-AT-User
-	request_header -X-AT-Username
-	request_header -X-AT-Roles
+	handle_path /apps/durable-pi/* {
+		# Strip client-supplied identity BEFORE forward_auth adds its own.
+		request_header -X-AT-User
+		request_header -X-AT-Username
+		request_header -X-AT-Roles
 
-	# The control plane's authz listener answers on authz-net only.
-	forward_auth platform:8444 {
-		uri /authz?app=durable-pi
-		copy_headers X-AT-User X-AT-Username X-AT-Roles
+		forward_auth platform:8444 {
+			uri /authz?app=durable-pi
+			copy_headers X-AT-User X-AT-Username X-AT-Roles
+		}
+
+		reverse_proxy durable-pi:4781
 	}
 
-	reverse_proxy durable-pi:4781
-
-	header {
-		Strict-Transport-Security "max-age=31536000; includeSubDomains"
-		X-Frame-Options "DENY"
-		Referrer-Policy "no-referrer"
-		-Server
-	}
+	respond "Not found" 404
 }
